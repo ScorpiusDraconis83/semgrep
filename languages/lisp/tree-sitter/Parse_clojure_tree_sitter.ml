@@ -13,6 +13,7 @@
  * LICENSE for more details.
  *)
 open Common
+open Fpath_.Operators
 module CST = Tree_sitter_clojure.CST
 module R = Raw_tree
 open AST_generic
@@ -294,7 +295,7 @@ and map_read_cond_lit (env : env) ((v1, v2, v3, v4) : CST.read_cond_lit) =
 
 and map_source (env : env) (xs : CST.source) =
   R.List
-    (List.filter_map
+    (List_.filter_map
        (fun x ->
          match x with
          | `Form x ->
@@ -314,18 +315,18 @@ and map_sym_lit (env : env) ((v1, v2) : CST.sym_lit) =
 
 let parse file =
   H.wrap_parser
-    (fun () -> Tree_sitter_clojure.Parse.file file)
-    (fun cst ->
+    (fun () -> Tree_sitter_clojure.Parse.file !!file)
+    (fun cst _extras ->
       let env = { H.file; conv = H.line_col_to_pos file; extra = () } in
       let x = map_source env cst in
-      [ x |> G.raw |> G.exprstmt ])
+      [ x |> G.stmt_of_raw ])
 
 let parse_pattern str =
   H.wrap_parser
     (fun () -> Tree_sitter_clojure.Parse.string str)
-    (fun cst ->
-      let file = "<pattern>" in
-      let env = { H.file; conv = Hashtbl.create 0; extra = () } in
+    (fun cst _extras ->
+      let file = Fpath.v "<pattern>" in
+      let env = { H.file; conv = H.line_col_to_pos_pattern str; extra = () } in
       let e = map_source env cst in
       (* this will be simplified if needed in Parse_pattern.normalize_any *)
       Raw e)

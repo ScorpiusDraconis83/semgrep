@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2019 r2c
+ * Copyright (C) 2019 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -17,8 +17,7 @@ open Either_
 open Ast_js
 module G = AST_generic
 module H = AST_generic_helpers
-
-let logger = Logging.get_logger [ __MODULE__ ]
+module Log = Log_parser_javascript.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -71,8 +70,8 @@ let special (x, tok) =
   | UseStrict -> other_expr "UseStrict"
   | Null -> SR_Literal (G.Null tok)
   | Undefined -> SR_Literal (G.Undefined tok)
-  | This -> SR_Special (G.This, tok)
-  | Super -> SR_Special (G.Super, tok)
+  | This -> SR_Expr (G.N (G.IdSpecial ((G.This, tok), G.empty_id_info ())))
+  | Super -> SR_Expr (G.N (G.IdSpecial ((G.Super, tok), G.empty_id_info ())))
   | Require -> SR_Special (G.Require, tok)
   (* We could add a new IdSpecial to Semgrep and DeepSemgrep for `module` and
    * `exports` like we did for `Require`, but we only need to analyze CJS
@@ -123,7 +122,7 @@ let special (x, tok) =
         SR_NeedArgs
           (fun args ->
             G.Call
-              ( G.IdSpecial (G.ConcatString G.InterpolatedConcat, tok) |> G.e,
+              ( G.Special (G.ConcatString G.InterpolatedConcat, tok) |> G.e,
                 args |> List_.map (fun e -> G.Arg e) |> fb ))
       else
         SR_NeedArgs
@@ -137,7 +136,7 @@ let special (x, tok) =
                       [
                         G.Arg
                           (G.Call
-                             ( G.IdSpecial
+                             ( G.Special
                                  (* update: we don't use InterpolatedConcat
                                   * here anymore, to differentiate it from
                                   * the above case.
@@ -198,10 +197,12 @@ and xml { xml_kind = xml_tag; xml_attrs; xml_body } =
 
 and xml_kind = function
   | XmlClassic (v0, v1, v2, v3) ->
-      let v1 = ident v1 in
+      (* TODO Correctly parse Foo.Bar into IdQualified *)
+      let v1 = G.Id (ident v1, G.empty_id_info ()) in
       G.XmlClassic (v0, v1, v2, v3)
   | XmlSingleton (v0, v1, v2) ->
-      let v1 = ident v1 in
+      (* TODO Correctly parse Foo.Bar into IdQualified *)
+      let v1 = G.Id (ident v1, G.empty_id_info ()) in
       XmlSingleton (v0, v1, v2)
   | XmlFragment (v1, v2) -> XmlFragment (v1, v2)
 
@@ -252,7 +253,7 @@ and expr (x : expr) =
   | IdSpecial v1 ->
       (let x = special v1 in
        match x with
-       | SR_Special v -> G.IdSpecial v
+       | SR_Special v -> G.Special v
        | SR_NeedArgs _ ->
            error (snd v1) "Impossible: should have been matched in Call first"
        | SR_Literal l -> G.L l
@@ -290,8 +291,8 @@ and expr (x : expr) =
         | QuestDot, tok ->
             let t = info tok in
             ( t,
-              G.Call (G.IdSpecial (G.Op G.Elvis, t) |> G.e, fb [ G.Arg e ])
-              |> G.e )
+              G.Call (G.Special (G.Op G.Elvis, t) |> G.e, fb [ G.Arg e ]) |> G.e
+            )
       in
       let v2 = property_name v2 in
       (match v2 with
@@ -304,7 +305,7 @@ and expr (x : expr) =
       let e = G.Lambda def |> G.e in
       (* Since the attrs aren't included in the AST, at least update the range
        * to include them. See
-       * https://github.com/returntocorp/semgrep/issues/7353 *)
+       * https://github.com/semgrep/semgrep/issues/7353 *)
       let attrs_any = List_.map (fun attr -> G.At attr) more_attrs in
       H.set_e_range_with_anys (G.Dk (G.FuncDef def) :: attrs_any) e;
       e
@@ -312,10 +313,9 @@ and expr (x : expr) =
       let x = special v1 in
       let v2 = bracket (list expr) v2 in
       (match x with
-      | SR_Special v ->
-          G.Call (G.IdSpecial v |> G.e, bracket (List_.map G.arg) v2)
+      | SR_Special v -> G.Call (G.Special v |> G.e, bracket (List_.map G.arg) v2)
       | SR_Literal l ->
-          logger#info "Weird: literal in call position";
+          Log.warn (fun m -> m "Weird: literal in call position");
           (* apparently there's code like (null)("fs"), no idea what that is *)
           G.Call (G.L l |> G.e, bracket (List_.map G.arg) v2)
       | SR_NeedArgs f -> f (Tok.unbracket v2)
@@ -412,7 +412,7 @@ and catch_block = function
         (* bugfix: reusing 't' to avoid NoTokenLocation error when
          * a semgrep patter like catch($ERR) matches an UnboundCatch. *)
       in
-      (t, G.CatchPattern (G.PatUnderscore t), v1)
+      (t, G.CatchPattern (G.PatWildcard t), v1)
 
 and tok_and_stmt (t, v) =
   let v = stmt v in
@@ -457,9 +457,7 @@ and for_header = function
             let e = expr e in
             H.expr_to_pattern e
       in
-      let e =
-        G.Call (G.IdSpecial (G.ForOf, t) |> G.e, fb [ G.Arg v2 ]) |> G.e
-      in
+      let e = G.Call (G.Special (G.ForOf, t) |> G.e, fb [ G.Arg v2 ]) |> G.e in
       G.ForEach (pattern, t, e)
   | ForEllipsis v1 -> G.ForEllipsis v1
 
@@ -533,7 +531,7 @@ and definition (ent, def) =
       let ty = option type_ ty in
       let v3 = option expr x_init in
       ( { ent with G.attrs = v2 :: ent.G.attrs },
-        G.VarDef { G.vinit = v3; G.vtype = ty } )
+        G.VarDef { G.vinit = v3; vtype = ty; vtok = G.no_sc } )
   | FuncDef def ->
       let def, more_attrs = fun_ def in
       ({ ent with G.attrs = ent.G.attrs @ more_attrs }, G.FuncDef def)
@@ -552,7 +550,7 @@ and var_of_var
   let ent = G.basic_entity v1 ~attrs:(v2 :: attrs) in
   let v3 = option expr x_init in
   let v_type = option type_ v_type in
-  (ent, { G.vinit = v3; vtype = v_type })
+  (ent, { G.vinit = v3; vtype = v_type; vtok = G.no_sc })
 
 and var_kind (x, tok) =
   match x with
@@ -666,7 +664,7 @@ and field_classic
   let ent =
     match v1 with
     | Left n -> G.basic_entity n ~attrs:v2
-    | Right e -> { G.name = G.EDynamic e; attrs = v2; tparams = [] }
+    | Right e -> { G.name = G.EDynamic e; attrs = v2; tparams = None }
   in
   match v3 with
   | Some (Fun (def, None)) ->
@@ -681,7 +679,7 @@ and field_classic
         G.FuncDef { def with G.fkind = (fkind, tok) } )
   | _ ->
       let v3 = option expr v3 in
-      (ent, G.VarDef { G.vinit = v3; vtype = vt })
+      (ent, G.VarDef { G.vinit = v3; vtype = vt; vtok = G.no_sc })
 
 and property x =
   match x with
@@ -704,7 +702,7 @@ and property x =
       let e = G.special spec [ v1 ] in
       let st = G.exprstmt e in
       G.F st
-  | FieldEllipsis v1 -> G.fieldEllipsis v1
+  | FieldEllipsis v1 -> G.field_ellipsis v1
   | FieldPatDefault (v1, _v2, v3) ->
       let v1 = pattern v1 in
       let v3 = expr v3 in
@@ -727,8 +725,8 @@ and module_directive x =
       let v1 =
         List_.map
           (fun (v1, v2) ->
-            let v1 = name v1 and v2 = option alias v2 in
-            (v1, v2))
+            let v1 = name v1 and v2 = option name v2 in
+            H.mk_import_from_kind v1 v2)
           v1
       in
       let v2 = filename v2 in
@@ -751,7 +749,7 @@ and list_stmt xs =
   (* converting require() in import, so they can benefit from the
    * other goodies coming with import in semgrep (e.g., equivalence aliasing)
    *)
-  xs |> List_.map (fun st -> [ stmt st ]) |> List.flatten
+  xs |> List_.map (fun st -> [ stmt st ]) |> List_.flatten
 
 and program v = list_stmt v
 

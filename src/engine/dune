@@ -5,8 +5,10 @@
  (libraries
    pcre
    alcotest
+   calendar
 
    commons
+   tracing
    pfff-lang_GENERIC-analyze
 
    parser_regexp
@@ -23,9 +25,9 @@
    ; call Parse_pattern from Eval_generic)
    semgrep_parsing
    ; TODO: we should get rid of this dependency
-   semgrep_targeting ; for Input_to_core.atd
+   semgrep_targeting
    semgrep_reporting; for Test_engine.ml, we should split in tests/ separate dir
  )
  (inline_tests)
- (preprocess (pps ppx_deriving.show ppx_profiling ppx_inline_test))
+ (preprocess (pps ppx_deriving.show ppx_profiling ppx_inline_test tracing.ppx))
 )

@@ -14,6 +14,7 @@
  *)
 open Common
 open Either_
+open Fpath_.Operators
 module AST = Ast_go
 module CST = Tree_sitter_go.CST
 open Ast_go
@@ -1404,8 +1405,8 @@ let source_file (env : env) (xs : CST.source_file) : program =
 
 let parse file =
   H.wrap_parser
-    (fun () -> Tree_sitter_go.Parse.file file)
-    (fun cst ->
+    (fun () -> Tree_sitter_go.Parse.file !!file)
+    (fun cst _extras ->
       let env = { H.file; conv = H.line_col_to_pos file; extra = () } in
       let x = source_file env cst in
       x)

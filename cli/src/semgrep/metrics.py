@@ -2,6 +2,7 @@ import functools
 import hashlib
 import json
 import os
+import platform
 import uuid
 from collections import defaultdict
 from datetime import datetime
@@ -27,6 +28,7 @@ from typing_extensions import LiteralString
 import semgrep.semgrep_interfaces.semgrep_metrics as met
 import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semgrep import __VERSION__
+from semgrep.constants import USER_FRIENDLY_PRODUCT_NAMES
 from semgrep.error import error_type_string
 from semgrep.error import SemgrepError
 from semgrep.parsing_data import ParsingData
@@ -43,7 +45,6 @@ from semgrep.semgrep_interfaces.semgrep_metrics import FileStats
 from semgrep.semgrep_interfaces.semgrep_metrics import Interfile
 from semgrep.semgrep_interfaces.semgrep_metrics import Interprocedural
 from semgrep.semgrep_interfaces.semgrep_metrics import Intraprocedural
-from semgrep.semgrep_interfaces.semgrep_metrics import Misc
 from semgrep.semgrep_interfaces.semgrep_metrics import ParseStat
 from semgrep.semgrep_interfaces.semgrep_metrics import Payload
 from semgrep.semgrep_interfaces.semgrep_metrics import Performance
@@ -51,6 +52,7 @@ from semgrep.semgrep_interfaces.semgrep_metrics import ProFeatures
 from semgrep.semgrep_interfaces.semgrep_metrics import RuleStats
 from semgrep.semgrep_interfaces.semgrep_metrics import SecretsConfig
 from semgrep.semgrep_interfaces.semgrep_metrics import SupplyChainConfig
+from semgrep.semgrep_interfaces.semgrep_metrics import Value
 from semgrep.semgrep_types import get_frozen_id
 from semgrep.types import FilteredMatches
 from semgrep.verbose_logging import getLogger
@@ -134,11 +136,13 @@ class Metrics:
                 projectHash=None,
                 ci=None,
                 isDiffScan=False,
+                os=platform.system(),
+                isTranspiledJS=False,
             ),
             errors=Errors(),
             performance=Performance(maxMemoryBytes=None),
             extension=Extension(),
-            value=Misc(features=[]),
+            value=Value(features=[]),
             started_at=Datetime(datetime.now().astimezone().isoformat()),
             event_id=met.Uuid(str(get_frozen_id())),
             anonymous_user_id="",
@@ -211,6 +215,22 @@ class Metrics:
         if not self.payload.value.proFeatures:
             self.payload.value.proFeatures = ProFeatures()
         self.payload.value.proFeatures.diffDepth = diff_depth
+
+    @suppress_errors
+    def add_num_diff_scanned(self, scanned: List[Path], rules: List[Rule]) -> None:
+        if not self.payload.value.proFeatures:
+            self.payload.value.proFeatures = ProFeatures()
+        langs = {lang for rule in rules for lang in rule.languages}
+        num_scanned = []
+        for lang in langs:
+            filtered = [
+                path
+                for path in scanned
+                if any(str(path).endswith(ext) for ext in lang.definition.exts)
+            ]
+            if filtered:
+                num_scanned.append((lang.definition.name, len(filtered)))
+        self.payload.value.proFeatures.numInterfileDiffScanned = num_scanned
 
     @suppress_errors
     def add_is_diff_scan(self, is_diff_scan: bool) -> None:
@@ -308,6 +328,15 @@ class Metrics:
         self.payload.value.numFindings = sum(len(v) for v in findings.kept.values())
         self.payload.value.numIgnored = sum(len(v) for v in findings.removed.values())
 
+        # Breakdown # of findings per-product.
+        _num_findings_by_product: Dict[out.Product, int] = defaultdict(int)
+        for r, f in findings.kept.items():
+            _num_findings_by_product[r.product] += len(f)
+        self.payload.value.numFindingsByProduct = [
+            (USER_FRIENDLY_PRODUCT_NAMES[p], n_findings)
+            for p, n_findings in _num_findings_by_product.items()
+        ]
+
     @suppress_errors
     def add_targets(self, targets: Set[Path], profile: Optional[out.Profile]) -> None:
         if profile:
@@ -328,6 +357,11 @@ class Metrics:
                 )
                 for target_times in profile.targets
             ]
+            # Sorted by key so that variation in target order can't be
+            # noticed by different ordering of file sizes.
+            self.payload.performance.fileStats = sorted(
+                self.payload.performance.fileStats, key=lambda fs: fs.size
+            )
         # TODO: fit the data in profile?
         total_bytes_scanned = sum(t.stat().st_size for t in targets)
         self.payload.performance.totalBytesScanned = total_bytes_scanned
@@ -467,11 +501,12 @@ class Metrics:
             if source == click.core.ParameterSource.PROMPT:
                 self.add_feature("cli-prompt", param)
 
-    # Posting the metrics is separated out so that our tests can check
-    # for it
-    # TODO it's a bit unfortunate that our tests are going to post
-    # metrics...
+    # Posting the metrics is separated out so that our tests can check for it
+    # TODO it's a bit unfortunate that our tests are going to post metrics...
     def _post_metrics(self, *, user_agent: str, local_scan_id: str) -> None:
+        # old: was also logging {self.as_json()}
+        # alt: save it in ~/.semgrep/logs/metrics.json?
+        logger.debug(f"Sending to {METRICS_ENDPOINT}")
         r = requests.post(
             METRICS_ENDPOINT,
             data=self.as_json(),
@@ -482,6 +517,7 @@ class Metrics:
             },
             timeout=3,
         )
+        logger.debug(f"response from {METRICS_ENDPOINT} {r.json()}")
         r.raise_for_status()
 
     @suppress_errors

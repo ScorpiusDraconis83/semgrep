@@ -1,1 +1,1 @@
-val tests : unit -> Alcotest_ext.test list
+val tests : < Cap.time_limit > -> Testo.t list

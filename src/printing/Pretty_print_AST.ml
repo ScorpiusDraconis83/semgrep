@@ -1,6 +1,6 @@
 (* Emma Jin, Yoann Padioleau
  *
- * Copyright (C) 2020, 2023 r2c
+ * Copyright (C) 2020, 2023 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -16,6 +16,7 @@ open Common
 open AST_generic
 module G = AST_generic
 module F = Format
+module Log = Log_printing.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -64,7 +65,7 @@ type env = { lang : Lang.t; (* indentation level *) level : int }
 (* Helpers *)
 (*****************************************************************************)
 let todo any =
-  UCommon.pr2 (show_any any);
+  Log.warn (fun m -> m "Pretty_print_AST TODO: %s" (show_any any));
   "*TODO*"
 
 let rec indent = function
@@ -96,7 +97,9 @@ let _lang_kind = function
   | Lang.Java
   | Lang.Apex
   | Lang.Csharp
-  | Lang.Rust ->
+  | Lang.Rust
+  | Lang.Move_on_sui
+  | Lang.Move_on_aptos ->
       CLikeSemiColon
   | _other_ -> Other
 
@@ -165,7 +168,8 @@ let rec stmt env st =
   | DirectiveStmt _
   | DisjStmt (_, _)
   | OtherStmtWithStmt (_, _, _)
-  | OtherStmt (_, _) ->
+  | OtherStmt (_, _)
+  | RawStmt _ ->
       todo (S st)
 
 and label_ident env lbl =
@@ -206,6 +210,7 @@ and if_stmt env (tok, e, s, sopt) =
   let bracket_body = F.sprintf "%s %s" (* (if cond) body *) in
   let format_cond, elseif_str, format_block =
     match env.lang with
+    | Lang.Circom
     | Lang.Cairo
     | Lang.Xml
     | Lang.Dart
@@ -223,6 +228,7 @@ and if_stmt env (tok, e, s, sopt) =
     | Lang.Php
     | Lang.Promql
     | Lang.Protobuf
+    | Lang.Ql
     | Lang.Hack
     | Lang.Yaml
     | Lang.Html
@@ -241,6 +247,8 @@ and if_stmt env (tok, e, s, sopt) =
     | Lang.Json
     | Lang.Jsonnet
     | Lang.Js
+    | Lang.Move_on_sui
+    | Lang.Move_on_aptos
     | Lang.Ts
     | Lang.Vue
     | Lang.Kotlin
@@ -282,6 +290,7 @@ and while_stmt env (tok, e, s) =
   let ruby_while = F.sprintf "%s %s\n %s\nend" in
   let while_format =
     match env.lang with
+    | Lang.Circom
     | Lang.Cairo
     | Lang.Xml
     | Lang.Dart
@@ -302,7 +311,8 @@ and while_stmt env (tok, e, s) =
     | Lang.Solidity
     | Lang.Swift
     | Lang.Html
-    | Lang.Terraform ->
+    | Lang.Terraform
+    | Lang.Ql ->
         raise Todo
     | Lang.Python
     | Lang.Python2
@@ -317,6 +327,8 @@ and while_stmt env (tok, e, s) =
     | Lang.Json
     | Lang.Jsonnet
     | Lang.Js
+    | Lang.Move_on_sui
+    | Lang.Move_on_aptos
     | Lang.Ts
     | Lang.Vue
     | Lang.Rust
@@ -333,6 +345,7 @@ and do_while stmt env (s, e) =
   let c_do_while = F.sprintf "do %s\nwhile(%s)" in
   let do_while_format =
     match env.lang with
+    | Lang.Circom
     | Lang.Cairo
     | Lang.Xml
     | Lang.Dart
@@ -368,9 +381,12 @@ and do_while stmt env (s, e) =
     | Lang.Python
     | Lang.Python2
     | Lang.Python3
+    | Lang.Ql
     | Lang.Go
     | Lang.Json
     | Lang.Jsonnet
+    | Lang.Move_on_sui
+    | Lang.Move_on_aptos
     | Lang.Ocaml
     | Lang.Rust
     | Lang.R ->
@@ -382,6 +398,7 @@ and do_while stmt env (s, e) =
 and for_stmt env (for_tok, hdr, s) =
   let for_format =
     match env.lang with
+    | Lang.Circom
     | Lang.Cairo
     | Lang.Xml
     | Lang.Dart
@@ -410,6 +427,9 @@ and for_stmt env (for_tok, hdr, s) =
     | Lang.Csharp
     | Lang.Kotlin
     | Lang.Js
+    | Lang.Move_on_sui ->
+        failwith "Move on SUI has for loops????"
+    | Lang.Move_on_aptos
     | Lang.Ts
     | Lang.Vue
     | Lang.Rust
@@ -424,8 +444,9 @@ and for_stmt env (for_tok, hdr, s) =
     | Lang.Ruby -> F.sprintf "%s %s\ndo %s\nend"
     | Lang.Json
     | Lang.Jsonnet
-    | Lang.Ocaml ->
-        failwith "JSON/OCaml has for loops????"
+    | Lang.Ocaml
+    | Lang.Ql ->
+        failwith "JSON/OCaml/QL has for loops????"
   in
   let show_init = function
     | ForInitVar (ent, var_def) ->
@@ -478,6 +499,7 @@ and def_stmt env (entity, def_kind) =
   let var_def (ent, def) =
     let no_val, with_val =
       match env.lang with
+      | Lang.Circom
       | Lang.Cairo
       | Lang.Xml
       | Lang.Dart
@@ -520,9 +542,12 @@ and def_stmt env (entity, def_kind) =
       | Lang.Python
       | Lang.Python2
       | Lang.Python3
-      | Lang.Ruby ->
+      | Lang.Ruby
+      | Lang.Ql ->
           ( (fun _typ id _e -> F.sprintf "%s" id),
             fun _typ id e -> F.sprintf "%s = %s" id e )
+      | Lang.Move_on_sui
+      | Lang.Move_on_aptos
       | Lang.Rust ->
           ( (fun typ id _e -> F.sprintf "let %s: %s" id typ),
             fun typ id e -> F.sprintf "let %s: %s = %s" id typ e )
@@ -566,7 +591,8 @@ and expr env e =
   match e.e with
   | N (Id ((s, _), idinfo)) -> id env (s, idinfo)
   | N (IdQualified qualified_info) -> id_qualified env qualified_info
-  | IdSpecial (sp, tok) -> special env (sp, tok)
+  | N (IdSpecial (special, _)) -> id_special special
+  | Special (sp, tok) -> special env (sp, tok)
   | Call (e1, e2) -> call env (e1, e2)
   | New (_, t, _, es) -> new_call env (t, es)
   | L x -> literal env x
@@ -612,12 +638,17 @@ and id_qualified env { name_last = id, _toptTODO; name_middle; name_top; _ } =
   | Some (QExpr (e, _t)) -> expr env e ^ "::"
   | None -> ident id
 
-and special env = function
+and id_special = function
   | This, tok -> token ~d:"this" tok
   | Self, tok -> token ~d:"self" tok
+  | Super, tok -> token ~d:"super" tok
+  | Parent, tok -> token ~d:"parent" tok
+  | Cls, tok -> token ~d:"cls" tok
+
+and special env = function
   | Op op, tok -> arithop env (op, tok)
   | IncrDecr _, _ -> "" (* should be captured in the call *)
-  | sp, tok -> todo (E (IdSpecial (sp, tok) |> G.e))
+  | sp, tok -> todo (E (Special (sp, tok) |> G.e))
 
 and new_call env (t, (_, es, _)) =
   let s1 = type_ t in
@@ -626,13 +657,13 @@ and new_call env (t, (_, es, _)) =
 and call env (e, (_, es, _)) =
   let s1 = expr env e in
   match (e.e, es) with
-  | IdSpecial (Op In, _), [ e1; e2 ] ->
+  | Special (Op In, _), [ e1; e2 ] ->
       F.sprintf "%s in %s" (argument env e1) (argument env e2)
-  | IdSpecial (Op NotIn, _), [ e1; e2 ] ->
+  | Special (Op NotIn, _), [ e1; e2 ] ->
       F.sprintf "%s not in %s" (argument env e1) (argument env e2)
-  | IdSpecial (Op _, _), [ x; y ] ->
+  | Special (Op _, _), [ x; y ] ->
       F.sprintf "%s %s %s" (argument env x) s1 (argument env y)
-  | IdSpecial (IncrDecr (i_d, pre_post), _), [ x ] -> (
+  | Special (IncrDecr (i_d, pre_post), _), [ x ] -> (
       let op_str =
         match i_d with
         | Incr -> "++"
@@ -701,6 +732,7 @@ and field_ident env fi =
   match fi with
   | FN (Id (id, _idinfo)) -> ident id
   | FN (IdQualified qualified_info) -> id_qualified env qualified_info
+  | FN (IdSpecial (special, _idinfo)) -> id_special special
   | FDynamic e -> expr env e
 
 and tyvar env (id, typ) =

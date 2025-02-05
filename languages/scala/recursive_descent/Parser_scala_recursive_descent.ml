@@ -1,6 +1,6 @@
 (* Yoann Padioleau, Matthew McQuaid
  *
- * Copyright (C) 2021-2022 R2C
+ * Copyright (C) 2021-2022 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -20,8 +20,7 @@ module Flag = Flag_parsing
 open Token_scala
 open AST_scala
 module AST = AST_scala
-
-let logger = Logging.get_logger [ __MODULE__ ]
+module Log = Log_parser_scala.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -166,10 +165,10 @@ let with_logging funcname f in_ =
     let save = in_.depth in
     in_.depth <- in_.depth + 1;
     let depth = n_dash in_.depth in
-    logger#info "%s>%s: %s" depth funcname (T.show in_.token);
+    Log.debug (fun m -> m "%s>%s: %s" depth funcname (T.show in_.token));
     let res = f () in
     (* less: pass in_ ? *)
-    logger#info "%s<%s: %s" depth funcname (T.show in_.token);
+    Log.debug (fun m -> m "%s<%s: %s" depth funcname (T.show in_.token));
     in_.depth <- save;
     res)
   else f ()
@@ -180,12 +179,11 @@ let with_logging funcname f in_ =
 let error x in_ =
   let tok = in_.token in
   let info = TH.info_of_tok tok in
-  if !Flag.debug_parser then (
-    UCommon.pr2 (T.show tok);
-    UCommon.pr2 x);
+  if !Flag.debug_parser then
+    Log.err (fun m -> m "tok =%s, x = %s" (T.show tok) x);
   raise (Parsing_error.Syntax_error info)
 
-let warning s = if !Flag.debug_parser then UCommon.pr2 ("WARNING: " ^ s)
+let warning s = if !Flag.debug_parser then Log.warn (fun m -> m "%s" s)
 
 (*****************************************************************************)
 (* Helpers  *)
@@ -225,7 +223,7 @@ let convertToParam tk e =
 
 let convertToParams tk e =
   match e with
-  | Tuple (lb, xs, rb) -> (lb, (xs |> List.map (convertToParam tk), None), rb)
+  | Tuple (lb, xs, rb) -> (lb, (xs |> List_.map (convertToParam tk), None), rb)
   | _ -> fb tk ([ convertToParam tk e ], None)
 
 let makeMatchFromExpr e =
@@ -407,8 +405,9 @@ let inSepRegion tok f in_ =
  * a NEWLINE or NEWLINES *)
 let insertNL ?(newlines = false) in_ =
   if !debug_newline then (
-    logger#info "%s: %s" "insertNL" (T.show in_.token);
-    logger#info "inserting back a newline:%s" (Dumper.dump in_.last_nl));
+    Log.debug (fun m -> m "%s: %s" "insertNL" (T.show in_.token));
+    Log.debug (fun m ->
+        m "inserting back a newline:%s" (Dumper.dump in_.last_nl)));
   match in_.last_nl with
   | None -> error "IMPOSSIBLE? no last newline to insert back" in_
   | Some x ->
@@ -432,13 +431,15 @@ let afterLineEnd in_ =
             loop xs
         | _ ->
             if !debug_newline then
-              logger#info "%s: false because %s" "afterLineEnd" (T.show x);
+              Log.debug (fun m ->
+                  m "%s: false because %s" "afterLineEnd" (T.show x));
             false)
     | [] -> false
   in
   loop in_.passed |> fun b ->
   if !debug_newline then
-    logger#info "%s: %s, result = %b" "afterLineEnd" (T.show in_.token) b;
+    Log.debug (fun m ->
+        m "%s: %s, result = %b" "afterLineEnd" (T.show in_.token) b);
   b
 
 (* ------------------------------------------------------------------------- *)
@@ -458,7 +459,8 @@ let fetchToken in_ =
     match in_.rest with
     | [] -> error "IMPOSSIBLE? fetchToken: no more tokens" in_
     | x :: xs -> (
-        if !Flag.debug_lexer then logger#info "fetchToken: %s" (T.show x);
+        if !Flag.debug_lexer then
+          Log.debug (fun m -> m "fetchToken: %s" (T.show x));
 
         in_.rest <- xs;
 
@@ -1103,7 +1105,7 @@ let paramType_ =
  *                  | null
  *  }}}
 *)
-let literal ?(isNegated = None) ?(inPattern = false) in_ : literal =
+let literal ?isNegated ?(inPattern = false) in_ : literal =
   in_
   |> with_logging
        (spf "literal(isNegated:%s, inPattern:%b)" (Dumper.dump isNegated)
@@ -1404,7 +1406,7 @@ and simpleType in_ : type_ =
          | MINUS ii when lookingAhead (fun in_ -> TH.isNumericLit in_.token) in_
            ->
              nextToken in_;
-             let x = literal ~isNegated:(Some ii) in_ in
+             let x = literal ~isNegated:ii in_ in
              (* ast: SingletonTypeTree(x) *)
              TyLiteral x
          (* See https://docs.scala-lang.org/scala3/reference/changed-features/wildcards.html *)
@@ -1818,7 +1820,7 @@ and simplePattern in_ : pattern =
                     | _ -> true)
                   in_ ->
              nextToken in_;
-             let x = literal ~isNegated:(Some ii) ~inPattern:true in_ in
+             let x = literal ~isNegated:ii ~inPattern:true in_ in
              PatLiteral x
          | x when TH.isIdentBool x || x =~= Kthis ab -> (
              let t = stableId in_ in
@@ -2104,7 +2106,7 @@ and prefixExpr ?(is_block_expr = false) in_ : expr =
         match (t, in_.token) with
         | MINUS ii, x when TH.isNumericLit x (* uname == nme.UNARY_- ... *) ->
             (* start at the -, not the number *)
-            let x = literal ~isNegated:(Some ii) in_ in
+            let x = literal ~isNegated:ii in_ in
             let x' = L x in
             simpleExprRest ~canApply:true x' in_
         | _ ->
@@ -3496,7 +3498,8 @@ let paramClauses ~ofCaseClass owner _contextBoundBuf in_ : bindings list =
  *  TypeParam             ::= Id TypeParamClauseOpt TypeBounds {`<%` Type} {`:` Type}
  *  }}}
 *)
-let rec typeParamClauseOpt _owner _contextBoundBuf in_ : type_parameters =
+let rec typeParamClauseOpt _owner _contextBoundBuf in_ : type_parameters option
+    =
   in_
   |> with_logging "typeParamClauseOpt" (fun () ->
          let typeParam in_ =
@@ -3641,7 +3644,8 @@ let constrExpr vparamss in_ : expr =
  *  FunSig ::= id [FunTypeParamClause] ParamClauses
  *  }}}
 *)
-let funDefRest fkind _attrs name in_ : function_definition * type_parameters =
+let funDefRest fkind _attrs name in_ :
+    function_definition * type_parameters option =
   in_
   |> with_logging "funDefRest" (fun () ->
          (* let newmods = ref attrs in *)
@@ -4088,7 +4092,7 @@ let blockStatSeq in_ : block_stat list =
      if (true) then
        1 else 4
 *)
-let indentedExprOrBlockStatSeqUntil ?(until = None) in_ =
+let indentedExprOrBlockStatSeqUntil ?until in_ =
   let hit_until tok =
     match until with
     | Some tok' -> tok' =~= tok
@@ -4421,8 +4425,7 @@ let templateOpt ckind vparams in_ : template_definition =
  *  ObjectDef       ::= Id ClassTemplateOpt
  *  }}}
 *)
-let objectDef ?(isCase = None) ?(isPackageObject = None) attrs in_ : definition
-    =
+let objectDef ?isCase ?isPackageObject attrs in_ : definition =
   in_
   |> with_logging "objectDef" (fun () ->
          let ikind = TH.info_of_tok in_.token in
@@ -4465,7 +4468,7 @@ let objectDef ?(isCase = None) ?(isPackageObject = None) attrs in_ : definition
  *  }}}
 *)
 let packageObjectDef ipackage in_ : definition =
-  objectDef noMods ~isPackageObject:(Some ipackage) in_
+  objectDef noMods ~isPackageObject:ipackage in_
 (* AST: gen.mkPackageObject(defn, pidPos, pkgPos) *)
 
 let packageOrPackageObject ipackage in_ : top_stat =
@@ -4502,7 +4505,7 @@ let constructorAnnotations in_ : annotation list =
 *)
 
 (* pad: I added isTrait and isCase instead of abusing mods *)
-let classDef ?(isTrait = false) ?(isCase = None) attrs in_ : definition =
+let classDef ?(isTrait = false) ?isCase attrs in_ : definition =
   in_
   |> with_logging "classDef" (fun () ->
          let ikind = TH.info_of_tok in_.token in
@@ -4827,8 +4830,8 @@ let tmplDef attrs in_ : definition =
   | Kcase ii -> (
       nextToken in_;
       match in_.token with
-      | Kclass _ -> classDef ~isCase:(Some ii) attrs in_
-      | Kobject _ -> objectDef ~isCase:(Some ii) attrs in_
+      | Kclass _ -> classDef ~isCase:ii attrs in_
+      | Kobject _ -> objectDef ~isCase:ii attrs in_
       | _ when TH.isIdentBool in_.token -> EnumCaseDef (attrs, enumCaseRest in_)
       (* pad: my error message *)
       | _ -> error "expecting class or object after a case" in_)
@@ -4850,7 +4853,7 @@ let _ =
   tmplDef_ := tmplDef;
   blockStatSeq_ := blockStatSeq;
   (indentedExprOrBlockStatSeqUntil_ :=
-     fun env ~until -> indentedExprOrBlockStatSeqUntil ~until env);
+     fun env ~until -> indentedExprOrBlockStatSeqUntil ?until env);
   packageOrPackageObject_ := packageOrPackageObject;
 
   exprTypeArgs_ := exprTypeArgs;

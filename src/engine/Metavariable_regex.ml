@@ -1,6 +1,6 @@
 (* Brandon Wu
  *
- * Copyright (C) 2023 r2c
+ * Copyright (C) 2023 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -17,8 +17,7 @@ open Common
 module MV = Metavariable
 module RM = Range_with_metavars
 module G = AST_generic
-
-let logger = Logging.get_logger [ __MODULE__ ]
+module Log = Log_engine.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -39,7 +38,8 @@ let get_metavar_regex_capture_bindings env ~file r (mvar, re_str) =
   *)
   match List.assoc_opt mvar bindings with
   | None ->
-      logger#error "Attempted to regex capture on unbound metavar %s" mvar;
+      Log.warn (fun m ->
+          m "Attempted to regex capture on unbound metavar %s" mvar);
       None
   | Some mval -> (
       (* Piggy-back off of the Eval_generic logic so that we can get the
@@ -95,7 +95,9 @@ let get_metavar_regex_capture_bindings env ~file r (mvar, re_str) =
           | [] -> None
           | matches -> Some (List_.map snd matches))
       | _ ->
-          logger#error
-            "Somehow got a non-string or exn from str(%s) in generic evaluation"
-            mvar;
+          Log.err (fun m ->
+              m
+                "Somehow got a non-string or exn from str(%s) in generic \
+                 evaluation"
+                mvar);
           None)

@@ -1,4 +1,5 @@
-(*
+(* Heejong Lee
+ *
  * Copyright (C) 2023 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
@@ -34,6 +35,7 @@ type t =
   | BaseLine of Fpath.t list (* implies depth 0 *)
   | Depth of Fpath.t list (* starting point *) * int (* depth *)
   | WholeScan
+[@@deriving show]
 
 let map_targets f = function
   | BaseLine targets -> BaseLine (f targets)

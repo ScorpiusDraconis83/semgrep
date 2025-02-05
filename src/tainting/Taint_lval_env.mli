@@ -17,6 +17,8 @@
  * no alias analysis involved!
  *)
 
+open Shape_and_sig.Shape
+
 type t
 type env = t
 type taints_to_propagate = Taint.taints Dataflow_var_env.VarMap.t
@@ -29,6 +31,8 @@ type prop_fn =
 
 type add_fn = IL.lval -> Taint.taints -> env -> env
 
+(* pro-scan hook. The signature is complicated to avoid having to expose
+ * `t`s internals. *)
 val hook_propagate_to :
   (Dataflow_var_env.var ->
   Taint.taints ->
@@ -38,27 +42,71 @@ val hook_propagate_to :
   add:add_fn ->
   t)
   option
-  ref
-(** Pro hook, this is a bit complicated to avoid exposing `t`s internals. *)
+  Hook.t
 
 val empty : env
 val empty_inout : env Dataflow_core.inout
+val normalize_lval : IL.lval -> (IL.name * Taint.offset list) option
 
-val add : add_fn
-(** Add taints to an l-value.
+val add_shape :
+  IL.name -> Taint.offset list -> Taint.taints -> shape -> env -> env
+
+val add_lval_shape : IL.lval -> Taint.taints -> shape -> env -> env
+(** Add taints & shape to an l-value.
 
     Adding taints to x.a_1. ... .a_N will NOT taint the prefixes
     x.a_1. ... .a_i (i < N) (unless they become tainted separately).
-
-    Adding taints to x.a_1. ... . a_N [i] o_1...o_M is effectively
-    the same as adding taint to x.a_1. ... . a_N, since this environment
-    is not index-sensitive.
  *)
+
+val add : IL.name -> Taint.offset list -> Taint.taints -> env -> env
+
+val add_lval : add_fn
+(** Assign a set of taints (but no specific shape) to an l-value. *)
 
 (* THINK: Perhaps keep propagators outside of this environment? *)
 val propagate_to : Dataflow_var_env.var -> Taint.taints -> env -> env
 
-val dumb_find : env -> IL.lval -> [> `Clean | `None | `Tainted of Taint.taints ]
+val find_var : env -> IL.name -> cell option
+(** Find the 'cell' of a variable. *)
+
+val find_lval : env -> IL.lval -> cell option
+(** Find the 'cell' of an l-value. *)
+
+val find_poly :
+  env -> IL.name -> Taint.offset list -> (Taint.taints * shape) option
+(** Find the taints and shape associated to a variable (name) and an offset.
+    If an offset is not being explicitly recorded, then it returns the
+    taint associated to the longest offset prefix that is recorded. If that
+    taint is polymorphic, then it attaches the remaining offset suffix.
+
+    For example, given this shape (where 't is a taint variable):
+
+        Cell(`None, Obj {
+                .a -> Cell({"taint"}, Bot);
+                .b -> Cell({'t}, Bot)
+                })
+
+    With the offset .a we get:
+
+        Some ({"taint"}, Bot)
+
+    With the offset .b we get:
+
+        Some ({'t}, Bot)
+
+    With the offset .a.u we get:
+
+        Some ({"taint"}, Bot)
+
+    With the offset .b.u we get:
+
+        Some ({'t.u}, Bot)
+  *)
+
+val find_lval_poly : env -> IL.lval -> (Taint.taints * shape) option
+(** Same as 'find_poly' for l-values. *)
+
+val find_lval_xtaint : env -> IL.lval -> Xtaint.t
 (** Look up an l-value on the environemnt and return whether it's tainted, clean,
     or we hold no info about it. It does not check sub-lvalues, e.g. if we record
     that 'x.a' is tainted but had no explicit info about 'x.a.b', checking for
@@ -79,6 +127,7 @@ val clean : env -> IL.lval -> env
     clean the entire array! This seems drastic but it should help reducing FPs.
  *)
 
+val filter_tainted : (IL.name -> bool) -> env -> env
 val add_control_taints : env -> Taint.taints -> env
 val get_control_taints : env -> Taint.taints
 
@@ -91,11 +140,12 @@ val union : env -> env -> env
      branch, then x.a_1. ... . a_N may no longer be clean, but we assume the
      best case scenario to reduce FPs. *)
 
+val union_list : ?default:env -> env list -> env
 val equal : env -> env -> bool
 
 val equal_by_lval : env -> env -> IL.lval -> bool
 (** Check whether two environments assign the exact same taint to an l-value
  * and each one of its extensions. *)
 
-val to_string : (Taint.taints -> string) -> env -> string
-val seq_of_tainted : env -> (IL.lval * Taint.taints) Seq.t
+val to_string : env -> string
+val seq_of_tainted : env -> (IL.name * cell) Seq.t

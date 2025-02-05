@@ -61,6 +61,23 @@ let push (tbl : ('k, 'v list ref) Hashtbl.t) (key : 'k) (value : 'v) =
   in
   stack := value :: !stack
 
+let peek_opt (tbl : ('k, 'v list ref) Hashtbl.t) (key : 'k) : 'v option =
+  match Hashtbl.find_opt tbl key with
+  | Some { contents = hd :: _ } -> Some hd
+  | Some { contents = [] } -> None
+  | None -> None
+
 let get_stack tbl key =
   try !(Hashtbl.find tbl key) with
   | Not_found -> []
+
+(*****************************************************************************)
+(* Misc *)
+(*****************************************************************************)
+let map (f : 'k -> 'v -> 'w) (h : ('k, 'v) Hashtbl.t) : ('k, 'w) Hashtbl.t =
+  let res : ('k, 'w) Hashtbl.t = Hashtbl.create 101 in
+  h
+  |> Hashtbl.iter (fun k v ->
+         let w = f k v in
+         Hashtbl.add res k w);
+  res

@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2022 r2c
+ * Copyright (C) 2022 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -119,7 +119,8 @@ let desugar_ident env v : C.ident = (desugar_wrap desugar_string) env v
 let rec desugar_expr env v : C.expr =
   try desugar_expr_aux env v with
   | Failure "TODO" ->
-      UCommon.pr2 (spf "TODO: construct not handled:\n %s" (show_expr v));
+      (* nosemgrep: no-logs-in-library *)
+      Logs.debug (fun m -> m "construct not handled:\n %s" (show_expr v));
       failwith "TODO:desugar"
 
 and desugar_expr_aux env v =
@@ -492,7 +493,7 @@ and desugar_import env v : C.expr =
       let final_path = Filename.concat env.base str in
       if not (Sys.file_exists final_path) then
         error tk (spf "file does not exist: %s" final_path);
-      let s = UCommon.read_file final_path in
+      let s = UFile.Legacy.read_file final_path in
       C.L (mk_str_literal (s, tk))
 
 (*****************************************************************************)

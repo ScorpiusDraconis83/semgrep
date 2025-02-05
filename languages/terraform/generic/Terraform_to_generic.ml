@@ -30,7 +30,7 @@ let fb = Tok.unsafe_fake_bracket
 let map_argument (arg : argument) : G.definition =
   let id, _teq, e = arg in
   let ent = G.basic_entity id in
-  let def = { G.vinit = Some e; vtype = None } in
+  let def = { G.vinit = Some e; vtype = None; vtok = G.no_sc } in
   (ent, G.VarDef def)
 
 (* We convert to a field, to be similar to Parse_terraform_xxx.map_object,
@@ -44,7 +44,7 @@ let rec map_block_body_element (x : block_body_element) : G.field =
   | Block blk ->
       let e = map_block blk in
       G.F (G.exprstmt e)
-  | BlockEllipsis t -> G.fieldEllipsis t
+  | BlockEllipsis t -> G.field_ellipsis t
 
 (* TODO? convert to a definition? a class_def?
  * coupling: Constant_propagation.terraform_stmt_to_vardefs

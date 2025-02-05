@@ -2,8 +2,20 @@
  * is for Unsafe use of Cmd (hence the name). see TCB/Cap.mli for more info.
  *)
 
+(*
+   The following functions capture the error output of the command being run
+   and logs it as the info level, allowing it to be silenced by adjusting
+   the log level.
+*)
 val string_of_run :
   trim:bool -> Cmd.t -> (string * Cmd.run_status, [> Rresult.R.msg ]) result
+
+val string_of_run_with_stderr :
+  trim:bool ->
+  Cmd.t ->
+  (string * Cmd.run_status, [> Rresult.R.msg ]) result * string
+(** Like string_of_run but instead of logging the stderr output, it captures it and returns it (in both success and failure cases). *
+ * The first part of the return type matches the return value of `string_of_run`; the last string part contains the stderr contents *)
 
 val lines_of_run :
   trim:bool ->

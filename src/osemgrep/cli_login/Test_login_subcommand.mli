@@ -1,12 +1,8 @@
-(* alt: use Login_subcommand.caps *)
-val tests : < Cap.network ; Cap.stdout > -> Alcotest_ext.test list
+val tests : Login_subcommand.caps -> Testo.t list
 
 (* to be reused in other tests *)
 
-type result = { exit_code : Exit_code.t; logs : string }
-
-val with_logs : f:(unit -> Exit_code.t) -> final:(result -> unit) -> unit
-val with_login_test_env : (unit -> 'a) -> unit -> 'a
-val with_fake_deployment_response : string -> (unit -> unit) -> unit
+val with_fake_deployment_response : string -> (unit -> 'a) -> 'a
+val with_semgrep_logged_in : (unit -> 'a) -> 'a
 val fake_token : string
 val fake_deployment : string

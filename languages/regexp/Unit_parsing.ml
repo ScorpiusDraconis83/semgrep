@@ -4,8 +4,15 @@
 
 open Common
 
+let t = Testo.create
+
 (* ran from the root of the semgrep repository *)
 let tests_path = "tests"
+
+(* Check that no syntax error is raised (without checking the parse tree) *)
+let test_syntax pat () =
+  let _ = Parse.string pat in
+  ()
 
 let test_valid_files dialect rel_path () =
   let dir = Filename.concat tests_path rel_path in
@@ -35,29 +42,43 @@ let test_invalid_files dialect rel_path () =
                file)
 
 let tests =
-  Alcotest_ext.pack_suites "regexp parsing"
+  Testo.categorize_suites "regexp parsing"
     [
-      Alcotest_ext.pack_tests "pcre"
+      Testo.categorize "pcre"
         [
-          ("valid files", test_valid_files Dialect.PCRE "regexp/pcre/parsing");
-          ( "invalid files",
-            test_invalid_files Dialect.PCRE "regexp/pcre/parsing_errors" );
+          (* The user mostly likely intended '[[:alpha:]]'.
+             PCRE reports an error when encountering a POSIX
+             character class outside of square brackets but we don't. *)
+          t "not a posix character class" (test_syntax {|[:alpha:]|});
+          t "not a broken posix character class" (test_syntax {|[:]|});
+          (* Tolerate some malformed input.
+             We don't necessarily need to tolerate malformed input but
+             we want at least to avoid uninformative errors such as
+             'Failure "lexing: empty token"' *)
+          t "tolerate unfinished character class" (test_syntax {|[a|});
+          t "tolerate unfinished posix character class"
+            (test_syntax {|[[:alpha|});
+          t "tolerate unfinished non-capturing group" (test_syntax {|(?|});
+          t "tolerate unfinished raw sequence" (test_syntax {|\Qabc|});
+          (* Check regexps kept in files *)
+          t "valid files" (test_valid_files Dialect.PCRE "regexp/pcre/parsing");
+          t "invalid files"
+            (test_invalid_files Dialect.PCRE "regexp/pcre/parsing_errors");
         ];
-      Alcotest_ext.pack_tests "pcre_extended"
+      Testo.categorize "pcre_extended"
         [
-          ( "valid files",
-            test_valid_files Dialect.PCRE_extended
-              "regexp/pcre_extended/parsing" );
-          ( "invalid files",
-            test_invalid_files Dialect.PCRE_extended
-              "regexp/pcre_extended/parsing_errors" );
+          t "valid files"
+            (test_valid_files Dialect.PCRE_extended
+               "regexp/pcre_extended/parsing");
+          t "invalid files"
+            (test_invalid_files Dialect.PCRE_extended
+               "regexp/pcre_extended/parsing_errors");
         ];
-      Alcotest_ext.pack_tests "perl_xx"
+      Testo.categorize "perl_xx"
         [
-          ( "valid files",
-            test_valid_files Dialect.Perl_xx "regexp/perl_xx/parsing" );
-          ( "invalid files",
-            test_invalid_files Dialect.Perl_xx "regexp/perl_xx/parsing_errors"
-          );
+          t "valid files"
+            (test_valid_files Dialect.Perl_xx "regexp/perl_xx/parsing");
+          t "invalid files"
+            (test_invalid_files Dialect.Perl_xx "regexp/perl_xx/parsing_errors");
         ];
     ]

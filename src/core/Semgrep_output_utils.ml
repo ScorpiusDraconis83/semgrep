@@ -41,7 +41,7 @@ let first_and_last = function
  *   lines="".join(rule_match.lines).rstrip(),
  *)
 let lines_of_file_at_range (range : position * position) (file : Fpath.t) :
-    string list =
+    (string list, string) result =
   let start, end_ = range in
   UFile.lines_of_file (start.line, end_.line) file
 [@@profiling]
@@ -85,7 +85,7 @@ let position_range min_loc max_loc =
 
 let location_of_token_location loc =
   let start, end_ = position_range loc loc in
-  { path = Fpath.v loc.Tok.pos.file; start; end_ }
+  { path = loc.Tok.pos.file; start; end_ }
 
 (* None if pi has no location information. Fake tokens should have been
  * filtered out earlier, but in case one slipped through we handle this case.
@@ -93,7 +93,7 @@ let location_of_token_location loc =
 let parse_info_to_location pi =
   Tok.loc_of_tok pi |> Result.to_option |> Option.map location_of_token_location
 
-let tokens_to_locations toks = List_.map_filter parse_info_to_location toks
+let tokens_to_locations toks = List_.filter_map parse_info_to_location toks
 
 let tokens_to_single_loc (toks : Tok.t list) : location option =
   (* toks should be nonempty and should contain only origintoks, but since we

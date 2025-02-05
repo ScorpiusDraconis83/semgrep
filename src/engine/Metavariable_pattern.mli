@@ -15,6 +15,7 @@ val get_nested_metavar_pattern_bindings :
   Range_with_metavars.t ->
   (* The arguments in CondNestedFormula *)
   Metavariable.mvar ->
-  Xlang.t option ->
+  (* Why is this analyzer optional? *)
+  Analyzer.t option ->
   Rule.formula ->
   Metavariable.bindings list

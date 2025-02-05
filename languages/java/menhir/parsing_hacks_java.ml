@@ -1,7 +1,7 @@
 (* Yoann Padioleau
  *
  * Copyright (C) 2012 Facebook
- * Copyright (C) 2020 r2c
+ * Copyright (C) 2020 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -19,8 +19,7 @@ module Flag = Flag_parsing
 module TH = Token_helpers_java
 module F = Ast_fuzzy
 module T = Parser_java
-
-let logger = Logging.get_logger [ __MODULE__ ]
+module Log = Log_parser_java.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -53,11 +52,12 @@ let fix_tokens_generics xs =
   let rec aux env xs =
     let depth_angle = env in
     if depth_angle < 0 then (
-      logger#error "depth_angle < 0, %d" depth_angle;
-      logger#error "%s"
-        (match xs with
-        | x :: _ -> Dumper.dump x
-        | [] -> "<can't get info from empty list>");
+      Log.warn (fun m -> m "depth_angle < 0, %d" depth_angle);
+      Log.debug (fun m ->
+          m "%s"
+            (match xs with
+            | x :: _ -> Dumper.dump x
+            | [] -> "<can't get info from empty list>"));
       (* alt: failwith "depth < 0" *)
       aux 0 xs)
     else
@@ -124,7 +124,7 @@ let fix_tokens_generics xs =
        * this code. But pb, see previous comment.
        *)
       | IDENTIFIER (s, ii1) :: LT ii2 :: xs when s =~ "^[A-Z]" ->
-          logger#info "retagging < at %s" (Tok.stringpos_of_tok ii2);
+          Log.debug (fun m -> m "retagging < at %s" (Tok.stringpos_of_tok ii2));
           IDENTIFIER (s, ii1) :: LT_GENERIC ii2 :: aux (depth_angle + 1) xs
       | IDENTIFIER (s, ii1)
         :: TCommentSpace iispace
@@ -132,13 +132,13 @@ let fix_tokens_generics xs =
         :: IDENTIFIER (s3, ii3)
         :: xs
         when s =~ "^[A-Z]" && s3 =~ "^[A-Z]" ->
-          logger#info "retagging < at %s" (Tok.stringpos_of_tok ii2);
+          Log.debug (fun m -> m "retagging < at %s" (Tok.stringpos_of_tok ii2));
           IDENTIFIER (s, ii1)
           :: TCommentSpace iispace :: LT_GENERIC ii2
           :: aux (depth_angle + 1) (IDENTIFIER (s3, ii3) :: xs)
       | IDENTIFIER (s, ii1) :: TCommentSpace iispace :: LT ii2 :: COND ii3 :: xs
         when s =~ "^[A-Z]" ->
-          logger#info "retagging < at %s" (Tok.stringpos_of_tok ii2);
+          Log.debug (fun m -> m "retagging < at %s" (Tok.stringpos_of_tok ii2));
           IDENTIFIER (s, ii1)
           :: TCommentSpace iispace :: LT_GENERIC ii2
           :: aux (depth_angle + 1) (COND ii3 :: xs)
@@ -147,7 +147,7 @@ let fix_tokens_generics xs =
        * so at least the >> get transformed into > >.
        *)
       | DOT ii1 :: LT ii2 :: xs ->
-          logger#info "retagging < at %s" (Tok.stringpos_of_tok ii2);
+          Log.debug (fun m -> m "retagging < at %s" (Tok.stringpos_of_tok ii2));
           DOT ii1 :: LT_GENERIC ii2 :: aux (depth_angle + 1) xs
       (* <T extends ...> bar().
        * could also check for public|static|... just before the <
@@ -190,7 +190,9 @@ let fix_tokens_fuzzy toks =
     let retag_lparen_constructor = Hashtbl.create 101 in
 
     let horigin =
-      toks |> List.map (fun t -> (TH.info_of_tok t, t)) |> Hashtbl_.hash_of_list
+      toks
+      |> List_.map (fun t -> (TH.info_of_tok t, t))
+      |> Hashtbl_.hash_of_list
     in
 
     (match trees with
@@ -232,17 +234,19 @@ let fix_tokens_fuzzy toks =
 
     (* use the tagged information and transform tokens *)
     toks
-    |> List.map (function
+    |> List_.map (function
          | T.LP info when Hashtbl.mem retag_lparen info ->
-             logger#info "retagging ( for lambda at %s"
-               (Tok.stringpos_of_tok info);
+             Log.debug (fun m ->
+                 m "retagging ( for lambda at %s" (Tok.stringpos_of_tok info));
              T.LP_LAMBDA info
          | T.LP info when Hashtbl.mem retag_lparen_constructor info ->
-             logger#info "retagging ( for constructor at %s"
-               (Tok.stringpos_of_tok info);
+             Log.debug (fun m ->
+                 m "retagging ( for constructor at %s"
+                   (Tok.stringpos_of_tok info));
              T.LP_PARAM info
          | T.DEFAULT info when Hashtbl.mem retag_default info ->
-             logger#info "retagging default at %s" (Tok.stringpos_of_tok info);
+             Log.debug (fun m ->
+                 m "retagging default at %s" (Tok.stringpos_of_tok info));
              T.DEFAULT_COLON info
          | x -> x)
   with

@@ -8,7 +8,7 @@
 (*
   Extra utilities to convert between lists of files between
   string and Fpath.t without having to write
-  'Common.map Fpath.v ...' every time.
+  'List_.map Fpath.v ...' every time.
 
   For converting a single path, use Fpath.v and Fpath.to_string directly.
 
@@ -24,10 +24,30 @@
  *)
 val of_strings : string list -> Fpath.t list
 val to_strings : Fpath.t list -> string list
+val to_yojson : Fpath.t -> Yojson.Safe.t
+val of_yojson : Yojson.Safe.t -> (Fpath.t, string) result
+
+(* alias but with derived available *)
+type t = Fpath.t [@@deriving show, eq, ord, sexp]
+
+(*
+   Take a nonempty list of path segments and turn them in to relative path.
+   Only the last segment may by empty, representing a trailing slash.
+   For example, ["a"; "b"; ""] becomes "/a/b/" and
+   ["a"; "b"] becomes "a/b".
+   Raises Invalid_argument.
+*)
+val of_relative_segments : string list -> Fpath.t
 
 (* Fpath.to_string. Like for the other operators, we recommend using it
    with 'open File.Operators'. *)
 val ( !! ) : Fpath.t -> string
+
+(* Same as Fpath.append or Fpath.(//) but if the first argument is ".",
+   the second argument is returned as-is.
+   For example, 'append_no_dot (Fpath.v ".") (Fpath.v "a")'
+   equals 'Fpath.v "a"' rather than 'Fpath.v "./a"'. *)
+val append_no_dot : Fpath.t -> Fpath.t -> Fpath.t
 
 (*
    Operators on files or file paths or anything related to files.
@@ -55,4 +75,15 @@ module Operators : sig
   *)
 end
 
-val readable : root:Fpath.t -> Fpath.t -> Fpath.t
+(* Fpath.v "." *)
+val current_dir : Fpath.t
+
+(* exts (Fpath.v "foo.tar.gz") = ["tar";"gz"] *)
+val exts : Fpath.t -> string list
+
+(* split_ext ~multi:true (Fpath.v "a/foo.tar.gz") = Fpath.v "a/foo", ".tar.gz" *)
+val split_ext : ?multi:bool -> Fpath.t -> Fpath.t * string
+
+(* DO NOT USE THIS *)
+val fake_file : Fpath.t
+val is_fake_file : Fpath.t -> bool

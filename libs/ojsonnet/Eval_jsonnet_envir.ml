@@ -238,7 +238,7 @@ and eval_obj_inside env (l, x, r) : V.t =
       let hdupes = Hashtbl.create 16 in
       let fields =
         fields
-        |> List_.map_filter
+        |> List_.filter_map
              (fun { fld_name = FExpr (tk, ei, _); fld_hidden; fld_value } ->
                match eval_expr env ei with
                | Primitive (Null _) -> None
@@ -259,7 +259,7 @@ and eval_obj_inside env (l, x, r) : V.t =
                      }
                | v -> error tk (spf "field name was not a string: %s" (sv v)))
       in
-      let asserts_with_env = List.map (fun x -> (x, env)) assertsTODO in
+      let asserts_with_env = List_.map (fun x -> (x, env)) assertsTODO in
       V.Object (l, (asserts_with_env, fields), r)
   (* big TODO *)
   | ObjectComp _x -> error l "TODO: ObjectComp"
@@ -312,7 +312,7 @@ and manifest_value (v : V.t) : JSON.t =
       (* TODO: evaluate asserts *)
       let xs =
         fields
-        |> List_.map_filter (fun { V.fld_name; fld_hidden; fld_value } ->
+        |> List_.filter_map (fun { V.fld_name; fld_hidden; fld_value } ->
                match fst fld_hidden with
                | A.Hidden -> None
                | A.Visible

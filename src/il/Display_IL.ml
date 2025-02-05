@@ -1,20 +1,34 @@
 open IL
+module G = AST_generic
 
-let string_of_type (ty : IL.type_) =
-  match ty.type_.t with
+let string_of_type (ty : G.type_) =
+  match ty.t with
   | TyN (Id (id, _)) -> fst id
   | __else__ -> "<TYPE>"
 
 let string_of_base base =
   match base with
   | Var x -> str_of_name x
+  | VarSpecial (This, _) -> "<this>"
+  | VarSpecial (Self, _) -> "<self>"
   | VarSpecial _ -> "<VarSpecial>"
   | Mem _ -> "<Mem>"
 
 let string_of_offset offset =
   match offset.o with
   | Dot a -> ident_str_of_name a
+  | Index { e = Literal (G.Int parsed_int); _ } -> (
+      match Parsed_int.to_int_opt parsed_int with
+      | Some i -> Common.spf "[%d]" i
+      | None -> "[...]")
+  | Index { e = Literal (G.String (_, (str, _), _)); _ } ->
+      Common.spf "[\"%s\"]" str
   | Index _ -> "[...]"
+
+let string_of_offset_list offset =
+  if offset <> [] then
+    "." ^ String.concat "." (List_.map string_of_offset offset)
+  else ""
 
 let string_of_lval { base; rev_offset } =
   string_of_base base
@@ -51,19 +65,17 @@ let rec string_of_exp_kind e =
         (string_of_exp e2)
   | Operator ((op, _), _) -> Common.spf "<OP %s ...>" (G.show_operator op)
   | FixmeExp _ -> "<FIXME-EXP>"
-  | Composite (_, _)
-  | Record _
-  | Cast (_, _) ->
-      "<EXP>"
+  | Composite (_, _) -> "<COMPOSITE>"
+  | RecordOrDict _ -> "<RECORD-OR-DICT>"
+  | Cast (_, _) -> "<CAST>"
 
 and string_of_exp e = string_of_exp_kind e.e
 
 let string_of_argument arg =
   match arg with
-  | Unnamed { e = Fetch lval; _ } -> string_of_lval lval
-  | Unnamed _
-  | Named _ ->
-      "_"
+  | Unnamed e
+  | Named (_, e) ->
+      string_of_exp e
 
 let string_of_arguments args =
   List_.map string_of_argument args |> String.concat ","
@@ -79,15 +91,12 @@ let short_string_of_node_kind nkind =
   | NGoto (_, l) -> "goto " ^ str_of_label l
   | NReturn (_, e) -> Common.spf "return %s" (string_of_exp e)
   | NThrow _ -> "throw ...;"
-  | NLambda params ->
-      let params_strs = List_.map str_of_name params in
-      "LAMBDA " ^ String.concat ", " params_strs
   | NOther (Noop str) -> Common.spf "<noop: %s>" str
   | NOther _ -> "<other>"
   | NInstr x -> (
       match x.i with
       | Assign (lval, exp) -> string_of_lval lval ^ " = " ^ string_of_exp exp
-      | AssignAnon _ -> " ... = <lambda|class>"
+      | AssignAnon (lval, _) -> string_of_lval lval ^ " = " ^ "<lambda|class>"
       | Call (lval_opt, exp, args) ->
           let lval_str =
             match lval_opt with
@@ -113,10 +122,22 @@ let short_string_of_node_kind nkind =
 
 let at_exit_mark node str = if node.at_exit then str ^ " @exit" else str
 
+let pp_cfg (caps : < Cap.exec ; Cap.tmp >) f ?title (flow : cfg) : unit =
+  flow.graph
+  |> Ograph_call_dot_gv.pp_ograph_mutable_generic caps ?title
+       ~s_of_node:(fun (_nodei, node) ->
+         (short_string_of_node_kind node.n |> at_exit_mark node, None, None))
+       f
+
 (* using internally graphviz dot and ghostview on X11 *)
-let (display_cfg : cfg -> unit) =
- fun flow ->
+let display_cfg (caps : < Cap.exec ; Cap.tmp >) ?title (flow : cfg) : unit =
   flow.graph
   |> Ograph_call_dot_gv.print_ograph_mutable_generic
+       (caps :> < Cap.exec >)
+       ?title
+       ?output_file:
+         (Option.map
+            (fun s -> Fpath.(CapTmp.get_temp_dir_name caps#tmp / (s ^ ".dot")))
+            title)
        ~s_of_node:(fun (_nodei, node) ->
          (short_string_of_node_kind node.n |> at_exit_mark node, None, None))

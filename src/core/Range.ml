@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2020 r2c
+ * Copyright (C) 2020 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -13,6 +13,7 @@
  * LICENSE for more details.
  *)
 open Common
+open Fpath_.Operators
 
 (*****************************************************************************)
 (* Prelude *)
@@ -43,6 +44,22 @@ type t = { start : charpos; end_ : charpos } [@@deriving show]
 exception NotValidRange of string
 
 (*****************************************************************************)
+(* Comparisons *)
+(*****************************************************************************)
+
+let equal r1 r2 =
+  let { start = a1; end_ = b1 } = r1 in
+  let { start = a2; end_ = b2 } = r2 in
+  Int.equal a1 a2 && Int.equal b1 b2
+
+let compare r1 r2 =
+  let { start = a1; end_ = b1 } = r1 in
+  let { start = a2; end_ = b2 } = r2 in
+  match Int.compare a1 a2 with
+  | 0 -> Int.compare b1 b2
+  | cmp -> cmp
+
+(*****************************************************************************)
 (* Set operations *)
 (*****************************************************************************)
 (* is r1 included or equal to r2 *)
@@ -64,7 +81,7 @@ let rec ( $<>$ ) r1 r2 =
 (* ex: "line1-line2" *)
 (* This is useful for generating from git diffs,
    because git diffs only include the lines *)
-let range_of_line_spec str file =
+let range_of_line_spec str (file : Fpath.t) =
   if str =~ "\\([0-9]+\\)-\\([0-9]+\\)" then (
     let a, b = Common.matched2 str in
     let line1 = s_to_i a in
@@ -73,17 +90,17 @@ let range_of_line_spec str file =
     let converters = Pos.full_converters_large file in
     let start = ref (-1) in
     let end_ = ref (-1) in
-    for i = 0 to UFile.filesize (Fpath.v file) do
+    for i = 0 to UFile.filesize file do
       let l, _ = converters.bytepos_to_linecol_fun i in
       if l =|= line1 then start := i;
       if l =|= line2 then end_ := i
     done;
     if !start <> -1 && !end_ <> -1 then { start = !start; end_ = !end_ }
-    else failwith (spf "could not find range %s in %s" str file))
+    else failwith (spf "could not find range %s in %s" str !!file))
   else failwith (spf "wrong format for linecol range spec: %s" str)
 
 (* ex: "line1:col1-line2:col2" *)
-let range_of_linecol_spec str file =
+let range_of_linecol_spec str (file : Fpath.t) =
   if str =~ "\\([0-9]+\\):\\([0-9]+\\)-\\([0-9]+\\):\\([0-9]+\\)" then (
     let a, b, c, d = Common.matched4 str in
     let line1, col1 = (s_to_i a, s_to_i b) in
@@ -92,13 +109,13 @@ let range_of_linecol_spec str file =
     let converters = Pos.full_converters_large file in
     let start = ref (-1) in
     let end_ = ref (-1) in
-    for i = 0 to UFile.filesize (Fpath.v file) do
+    for i = 0 to UFile.filesize file do
       let l, c = converters.bytepos_to_linecol_fun i in
       if (l, c) =*= (line1, col1) then start := i;
       if (l, c) =*= (line2, col2) then end_ := i
     done;
     if !start <> -1 && !end_ <> -1 then { start = !start; end_ = !end_ }
-    else failwith (spf "could not find range %s in %s" str file))
+    else failwith (spf "could not find range %s in %s" str !!file))
   else failwith (spf "wrong format for linecol range spec: %s" str)
 
 let range_of_token_locations (start_loc : Tok.location) (end_loc : Tok.location)
@@ -119,11 +136,12 @@ let range_of_tokens xs =
   with
   | Tok.NoTokenLocation _ -> None
 
-let hmemo = Hashtbl.create 101
+let hmemo : (Fpath.t, string) Hashtbl.t = Hashtbl.create 101
 
 let () =
-  Common2.register_tmp_file_cleanup_hook (fun file -> Hashtbl.remove hmemo file)
+  (* nosemgrep: forbid-tmp *)
+  UTmp.register_temp_file_cleanup_hook (fun file -> Hashtbl.remove hmemo file)
 
 let content_at_range file r =
-  let str = Common.memoized hmemo file (fun () -> UCommon.read_file file) in
+  let str = Common.memoized hmemo file (fun () -> UFile.read_file file) in
   String.sub str r.start (r.end_ - r.start + 1)

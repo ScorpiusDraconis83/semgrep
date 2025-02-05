@@ -1,18 +1,28 @@
+open Common
+
 (*************************************************************************)
 (* Prelude *)
 (*************************************************************************)
 (* Temporary module while migrating code to osemgrep to fallback to
- * pysemgrep.
- *
+ * pysemgrep when osemgrep does not handle yet certain options.
  *)
 
 (*************************************************************************)
-(* Entry points *)
+(* Types *)
 (*************************************************************************)
-
 exception Fallback
+
+(*************************************************************************)
+(* Entry point *)
+(*************************************************************************)
 
 (* dispatch back to pysemgrep! *)
 let pysemgrep (caps : < Cap.exec >) argv =
-  (* pysemgrep should be in the PATH, thx to the code in ../../../cli/bin/semgrep *)
+  Logs.debug (fun m ->
+      m "execute pysemgrep: %s"
+        (argv |> Array.to_list
+        |> List_.map (fun arg -> spf "%S" arg)
+        |> String.concat " "));
+  (* pysemgrep should be in the PATH, thx to the code in
+     ../../../cli/bin/semgrep *)
   CapUnix.execvp caps#exec "pysemgrep" argv

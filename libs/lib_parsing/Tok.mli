@@ -78,7 +78,7 @@ val pp_full_token_info : bool ref
  * check for equality of big AST constructs (e.g., complex expressions) by not
  * caring about differences in token positions.
  *)
-type t_always_equal = t [@@deriving show, eq, hash, sexp]
+type t_always_equal = t [@@deriving show, eq, ord, hash, sexp]
 
 (*****************************************************************************)
 (* Token builders *)
@@ -88,13 +88,13 @@ val tok_of_lexbuf : Lexing.lexbuf -> t
 val tok_of_loc : location -> t
 
 (* deprecated: TODO used only in Lexer_php.mll *)
-val tok_of_str_and_bytepos : string -> int -> t
+val make : str:string -> file:Fpath.t -> bytepos:int -> t
 
 (* the token will be empty, but its pos will be the beginning of the file *)
-val first_tok_of_file : string (* filename *) -> t
+val first_tok_of_file : Fpath.t -> t
 
 (* similar, the location will be empty *)
-val first_loc_of_file : string (* filename *) -> location
+val first_loc_of_file : Fpath.t -> location
 
 (* used mainly by tree-sitter based parsers in semgrep.
  * [combine_toks t1 ts] will return a token where t1::ts
@@ -104,6 +104,46 @@ val first_loc_of_file : string (* filename *) -> location
    generic AST, which has type 'string wrap bracket'.
  *)
 val combine_toks : t -> t list -> t
+
+(* Try to concatenate the tokens such that the original (line, column) offsets
+   of each token are preserved in the concatenated string, as well as the byte
+   offset if possible.
+
+   Source with a line continuation and a comment:
+     "a \\\n# comment\nb"
+
+   Tokens obtained with a parser that removes comments and line continuations:
+     ["a "; "b"]
+
+   A naive concatenation gives us:
+     "a b"
+
+   A syntax error on "b" when parsing "a b" will report an error on
+   line 1, column 2 instead of line 3, column 0 in the source.
+
+   A suitable concatenation is:
+     "a         \\\n\\\nb"
+        ^^^^^^^^
+                ^^^^^^^^
+        inserted
+        spaces
+                inserted
+                line continuations
+
+   This is used to assemble Bash code fragments produced by the Dockerfile
+   parser before invoking the Bash parser. In this case, missing strings
+   are line continuations and comments.
+
+   Default values:
+   - ignorable_newline: "\n" (a single LF character)
+   - ignorable_blank: ' ' (space)
+*)
+val combine_sparse_toks :
+  ?ignorable_newline:string ->
+  ?ignorable_blank:char ->
+  t ->
+  t list ->
+  t Option.t
 
 (* Create the empty token corresponding to the position right after a
    given token. This is intended for representing empty strings and such. *)
@@ -133,7 +173,6 @@ val is_origintok : t -> bool
 
 exception NoTokenLocation of string
 
-val fake_location : location
 val fake_tok : t -> string -> t
 val unsafe_fake_tok : string -> t
 
@@ -167,7 +206,7 @@ val content_of_tok_opt : t -> string option
 val line_of_tok : t -> int
 val col_of_tok : t -> int
 val bytepos_of_tok : t -> int
-val file_of_tok : t -> string (* filename *)
+val file_of_tok : t -> Fpath.t
 
 (* Token positions in loc.pos denote the beginning of a token.
    Suppose we are interested in having instead the line, column, and charpos
@@ -214,10 +253,7 @@ val adjust_loc_wrt_base : location -> location -> location
  * during lexing because of limitations of ocamllex and Lexing.position.
  *)
 val complete_location :
-  string (* filename *) ->
-  Pos.bytepos_linecol_converters ->
-  location ->
-  location
+  Fpath.t -> Pos.bytepos_linecol_converters -> location -> location
 
 (*****************************************************************************)
 (* Misc *)

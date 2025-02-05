@@ -1,5 +1,6 @@
 (*
-   List files recursively in a safe, efficient, and portable manner.
+   List files recursively in a safe, efficient, and portable manner
+   (should work on Linux, macOS, and also Windows).
 
    Replaces the functions in libs/commons/ that use external UNIX commands
    such as 'find'.
@@ -30,7 +31,7 @@ val list_regular_files : ?keep_root:bool -> Fpath.t -> Fpath.t list
 
 (*
    List all files recursively. Exclude folders/directories.
-   Use Common.map_filter to exclude more file types.
+   Use List_.map_filter to exclude more file types.
 *)
 val list_with_stat : Fpath.t -> (Fpath.t * Unix.stats) list
 
@@ -46,3 +47,6 @@ val iter : (Fpath.t -> Unix.stats -> unit) -> Fpath.t -> unit
 
 (* Read the names found in a directory, excluding "." and "..". *)
 val read_dir_entries : Fpath.t -> string list
+
+(* same than read_dir_entries but return single segment Fpath.t *)
+val read_dir_entries_fpath : Fpath.t -> Fpath.t list

@@ -137,7 +137,7 @@ let module_name_of_filename s =
  *)
 let impl xs =
   xs
-  |> List.map (fun item ->
+  |> List_.map (fun item ->
          match item with
          (* let <fname> ... = ... [@@profiling <args_opt> *)
          | {
@@ -222,7 +222,7 @@ let impl xs =
              in
              [ item; item2 ]
          | x -> [ x ])
-  |> List.concat
+  |> List_.flatten
 
 (*****************************************************************************)
 (* Entry point *)

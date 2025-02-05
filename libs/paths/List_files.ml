@@ -1,6 +1,18 @@
+(* Martin Jambon
+ *
+ * Copyright (C) 2024-2025 Semgrep Inc.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public License
+ * version 2.1 as published by the Free Software Foundation.
+ *
+ * This library is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
+ * LICENSE for more details.
+ *)
 open Fpath_.Operators
-
-let logger = Logging.get_logger [ __MODULE__ ]
+module Log = Log_paths.Log
 
 (*************************************************************************)
 (* Prelude *)
@@ -38,6 +50,8 @@ let read_dir_entries path =
         | End_of_file -> List.rev acc
       in
       loop [])
+
+let read_dir_entries_fpath path = read_dir_entries path |> List_.map Fpath.v
 
 let rec iter_dir_entries func dir names =
   List.iter (iter_dir_entry func dir) names
@@ -79,8 +93,8 @@ let list path = list_with_stat path |> List_.map fst
 (* python: Target.files_from_filesystem *)
 let list_regular_files ?(keep_root = false) root_path =
   list_with_stat root_path
-  |> List_.map_filter (fun (path, (stat : Unix.stats)) ->
-         logger#info "root: %s path: %s" !!root_path !!path;
+  |> List_.filter_map (fun (path, (stat : Unix.stats)) ->
+         Log.debug (fun m -> m "root: %s path: %s" !!root_path !!path);
          if keep_root && path = root_path then Some path
          else
            match stat.st_kind with

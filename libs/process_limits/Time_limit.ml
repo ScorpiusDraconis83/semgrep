@@ -13,8 +13,7 @@
  * license.txt for more details.
  *)
 open Common
-
-let logger = Logging.get_logger [ __MODULE__ ]
+module Log = Log_process_limits.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -28,11 +27,12 @@ let logger = Logging.get_logger [ __MODULE__ ]
    - a descriptive name
    - the time limit
      The mli interface makes this type private to help prevent unsafe uses of
-     the exception.
+     the exception. The type is actually defined in the commons compilation
+     unit to allow logging to not treat it a an error.
 *)
-type timeout_info = { name : string; max_duration : float }
+type timeout_info = Exception.timeout_info
 
-exception Timeout of timeout_info
+exception Timeout = Exception.Timeout
 
 (*****************************************************************************)
 (* Helpers *)
@@ -41,7 +41,7 @@ exception Timeout of timeout_info
 (*****************************************************************************)
 (* Entry points *)
 (*****************************************************************************)
-let string_of_timeout_info { name; max_duration } =
+let string_of_timeout_info { Exception.name; max_duration } =
   spf "%s:%g" name max_duration
 
 let current_timer = ref None
@@ -63,25 +63,26 @@ let current_timer = ref None
 
   question: can we have a signal and so exn when in a exn handler ?
 *)
-let set_timeout ~name max_duration f =
+let set_timeout (caps : < Cap.time_limit >) ~name max_duration f =
   (match !current_timer with
   | None -> ()
-  | Some { name = running_name; max_duration = running_val } ->
+  | Some { Exception.name = running_name; max_duration = running_val } ->
       invalid_arg
         (spf
            "Common.set_timeout: cannot set a timeout %S of %g seconds. A timer \
             for %S of %g seconds is still running."
            name max_duration running_name running_val));
-  let info (* private *) = { name; max_duration } in
+  let info (* private *) = { Exception.name; max_duration } in
   let raise_timeout () = raise (Timeout info) in
   let clear_timer () =
     current_timer := None;
-    Unix.setitimer Unix.ITIMER_REAL { Unix.it_value = 0.; it_interval = 0. }
+    CapUnix.setitimer caps#time_limit Unix.ITIMER_REAL
+      { Unix.it_value = 0.; it_interval = 0. }
     |> ignore
   in
   let set_timer () =
     current_timer := Some info;
-    Unix.setitimer Unix.ITIMER_REAL
+    CapUnix.setitimer caps#time_limit Unix.ITIMER_REAL
       { Unix.it_value = max_duration; it_interval = 0. }
     |> ignore
   in
@@ -92,9 +93,9 @@ let set_timeout ~name max_duration f =
     clear_timer ();
     Some x
   with
-  | Timeout { name; max_duration } ->
+  | Timeout { Exception.name; max_duration } ->
       clear_timer ();
-      logger#info "%S timeout at %g s (we abort)" name max_duration;
+      Log.warn (fun m -> m "%S timeout at %g s (we abort)" name max_duration);
       None
   | exn ->
       let e = Exception.catch exn in
@@ -105,10 +106,10 @@ let set_timeout ~name max_duration f =
          Maybe signals are disabled when process an exception handler ?
       *)
       clear_timer ();
-      logger#info "exn while in set_timeout";
+      Log.err (fun m -> m "exn while in set_timeout");
       Exception.reraise e
 
 let set_timeout_opt ~name time_limit f =
   match time_limit with
   | None -> Some (f ())
-  | Some x -> set_timeout ~name x f
+  | Some (x, caps) -> set_timeout caps ~name x f

@@ -2,72 +2,20 @@
    Test List_files
 *)
 
-(* warning 37 [unused-constructor]): constructor X is never used to build
-   values. *)
-[@@@warning "-37"]
-
-open Printf
 open Fpath_.Operators
+open Testutil_paths
+module TP = Testutil_paths
 
-type file_tree = Dir of string * file_tree list | File of string * file_kind
-and file_kind = Regular of string | Symlink of string
-
-let write_file path data =
-  let oc = open_out_bin !!path in
-  output_string oc data;
-  close_out oc
-
-let rec create_files parent (x : file_tree) =
-  match x with
-  | Dir (name, files) ->
-      let dir_path = parent / name in
-      Unix.mkdir !!dir_path 0o777;
-      List.iter (create_files dir_path) files
-  | File (name, Regular data) ->
-      let path = parent / name in
-      write_file path data
-  | File (name, Symlink target_path) ->
-      let link_path = parent / name in
-      Unix.symlink target_path !!link_path
-
-let rec delete_files parent (x : file_tree) =
-  match x with
-  | Dir (name, files) ->
-      let dir_path = parent / name in
-      List.iter (delete_files dir_path) files;
-      Sys.rmdir !!dir_path
-  | File (name, _) -> Sys.remove !!(parent / name)
-
-(*
-   Create a temporary file tree as specified. The user-specified function
-   takes the root folder as argument and can assume that all the files
-   were created according to the specification.
-   Files are deleted automatically.
-*)
-let with_file_tree tree func =
-  let workspace =
-    Fpath.v (Filename.get_temp_dir_name ())
-    / sprintf "test-list_files-%i" (Random.bits ())
-  in
-  Unix.mkdir !!workspace 0o777;
-  Common.protect
-    ~finally:(fun () ->
-      try Sys.rmdir !!workspace with
-      | _ -> ())
-    (fun () ->
-      create_files workspace tree;
-      Common.protect
-        ~finally:(fun () -> delete_files workspace tree)
-        (fun () -> func workspace))
+let t = Testo.create
 
 let test_regular_file_as_root () =
-  with_file_tree
+  TP.with_file_tree
     (File ("hello", Regular "yo"))
     (fun workspace ->
       assert (List_files.list (workspace / "hello") = [ workspace / "hello" ]))
 
 let test_empty_dir_as_root () =
-  with_file_tree
+  TP.with_file_tree
     (Dir ("empty", []))
     (fun workspace -> assert (List_files.list (workspace / "empty") = []))
 
@@ -137,15 +85,15 @@ let test_symlink_as_root () =
         (List_files.list_regular_files ~keep_root:true root_path))
 
 let tests =
-  Alcotest_ext.pack_suites "List_files"
+  Testo.categorize_suites "List_files"
     [
-      Alcotest_ext.pack_tests "list"
+      Testo.categorize "list"
         [
-          ("regular_file_as_root", test_regular_file_as_root);
-          ("empty_dir_as_root", test_empty_dir_as_root);
-          ("regular_files", test_regular_files);
-          ("symlinks", test_symlinks);
-          ("ignore_symlinks", test_ignore_symlinks);
-          ("symlink_as_root", test_symlink_as_root);
+          t "regular_file_as_root" test_regular_file_as_root;
+          t "empty_dir_as_root" test_empty_dir_as_root;
+          t "regular_files" test_regular_files;
+          t "symlinks" test_symlinks;
+          t "ignore_symlinks" test_ignore_symlinks;
+          t "symlink_as_root" test_symlink_as_root;
         ];
     ]

@@ -7,12 +7,14 @@
  (libraries
    pcre
 
+   base
    commons
    git_wrapper
    paths
    lib_parsing
    process_limits
    spacegrep
+   uri ; for Parse_lockfile.ml
 
    pfff-lang_GENERIC-naming
 
@@ -27,6 +29,8 @@
    semgrep_optimizing
    semgrep.typing
    pfff_lang_GENERIC_analyze ; =~ semgrep_analyzing ; Constant_propagation in Parse_target.ml
+   semgrep_targeting ; for Input_to_core.atd
+
  )
  (preprocess (pps ppx_profiling ppx_deriving.show))
 )

@@ -1,20 +1,19 @@
+; the main code behind semgrep-core
 (library
- (public_name semgrep.running)
- (name semgrep_running)
+ (public_name semgrep.core_scan)
+ (name semgrep_core_scan)
  (wrapped false)
  (libraries
-    parmap
+    parallelism
 
     commons
     tracing
 
-    semgrep_core
-    semgrep_parsing
-    semgrep_matching
-    semgrep_reporting
-    semgrep_datalog
-    semgrep_engine
-    semgrep_experiments_misc
+    semgrep.core
+    semgrep.parsing
+    semgrep.matching
+    semgrep.reporting
+    semgrep.engine
  )
  (preprocess (pps
       ppx_deriving.show

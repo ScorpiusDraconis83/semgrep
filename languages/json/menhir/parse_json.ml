@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2020 r2c
+ * Copyright (C) 2020 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -13,13 +13,15 @@
  * license.txt for more details.
  *)
 open Parse_js
+open Fpath_.Operators
 module TH = Token_helpers_js
 module Flag = Flag_parsing
+module Log = Log_lib_parsing.Log
 
 let error_msg_tok tok = Parsing_helpers.error_message_info (TH.info_of_tok tok)
 
-let parse_program filename =
-  let toks = tokens (Parsing_helpers.file filename) in
+let parse_program (filename : Fpath.t) =
+  let toks = tokens (Parsing_helpers.file !!filename) in
   (* need need parsing hacks fix I think *)
   let tr, lexer, lexbuf_fake =
     Parsing_helpers.mk_lexer_for_yacc toks TH.is_comment
@@ -29,7 +31,7 @@ let parse_program filename =
   | Parsing.Parse_error ->
       let cur = tr.Parsing_helpers.current in
       if !Flag.show_parsing_error then
-        UCommon.pr2 ("parse error \n = " ^ error_msg_tok cur);
+        Log.err (fun m -> m "parse error \n = %s" (error_msg_tok cur));
       raise (Parsing_error.Syntax_error (TH.info_of_tok cur))
 
 let any_of_string str =

@@ -4,12 +4,24 @@ module OutJ = Semgrep_output_v1_j
 module OutUtils = Semgrep_output_utils
 module G = AST_generic
 
+(*****************************************************************************)
+(* Prelude *)
+(*****************************************************************************)
+
+(*****************************************************************************)
+(* Types *)
+(*****************************************************************************)
+
 type replacement = {
   mval_content : string Lazy.t;
   propagated_content : string option;
 }
 
 type replacement_ctx = (string * replacement) list
+
+(*****************************************************************************)
+(* Helpers *)
+(*****************************************************************************)
 
 let metavar_string_of_any any =
   (* TODO: metavar_string_of_any is used in get_propagated_value
@@ -40,9 +52,13 @@ let propagated_value_string_of_mval mval =
       | None -> None)
   | __else__ -> None
 
+(*****************************************************************************)
+(* Entry points *)
+(*****************************************************************************)
+
 let of_bindings bindings =
   bindings
-  |> List_.map_filter (fun (mvar, mval) ->
+  |> List_.filter_map (fun (mvar, mval) ->
          match MV.range_of_mvalue mval with
          | None -> None
          | Some (file, mval_range) ->
@@ -61,7 +77,7 @@ let of_out (metavars : OutJ.metavars) =
          in
          (mvar, { mval_content; propagated_content }))
 
-let interpolate_metavars (text : string) (ctx : replacement_ctx) : string =
+let interpolate_metavars ?fmt (text : string) (ctx : replacement_ctx) : string =
   (* sort by metavariable length to avoid name collisions
    * (eg. $X2 must be handled before $X)
    *)
@@ -86,5 +102,8 @@ let interpolate_metavars (text : string) (ctx : replacement_ctx) : string =
                 | Some s -> s (* default to the matched value *)
                 | None -> Lazy.force mval_content)
          |> Str.global_substitute (Str.regexp_string mvar) (fun _whole_str ->
-                Lazy.force mval_content))
+                let mval_content = Lazy.force mval_content in
+                Option.fold ~none:mval_content
+                  ~some:(fun fmt -> fmt mval_content)
+                  fmt))
        text

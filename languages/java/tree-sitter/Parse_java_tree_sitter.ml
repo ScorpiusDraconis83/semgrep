@@ -14,6 +14,7 @@
  *)
 open Common
 open Either
+open Fpath_.Operators
 module AST = Ast_java
 module CST = Tree_sitter_java.CST
 open Ast_java
@@ -512,6 +513,7 @@ and primary_expression (env : env) (x : CST.primary_expression) =
   | `Semg_ellips tok ->
       let tok = (* "..." *) token env tok in
       Ellipsis tok
+  | `Semg_named_ellips tok -> name_of_id env tok
   | `Choice_lit x -> (
       match x with
       | `Lit x -> Literal (literal env x)
@@ -765,11 +767,12 @@ and stmt1 tok = function
 and statement (env : env) ~tok (x : CST.statement) : Ast_java.stmt =
   statement_aux env x |> stmt1 tok
 
-and statement_aux env x : Ast_java.stmt list =
+and statement_aux (env : env) (x : CST.statement) : Ast_java.stmt list =
   match x with
   | `Semg_ellips tok ->
       let tok = (* "..." *) token env tok in
       [ Expr (Ellipsis tok, AST_generic.sc) ]
+  | `Semg_named_ellips tok -> [ Expr (name_of_id env tok, AST_generic.sc) ]
   | `Choice_decl x -> (
       match x with
       | `Decl x -> [ declaration env x ]
@@ -806,7 +809,7 @@ and statement_aux env x : Ast_java.stmt list =
           let v3 =
             match v3 with
             | `Local_var_decl x ->
-                let xs = local_variable_declaration env x in
+                let xs, _sc = local_variable_declaration env x in
                 ForInitVars xs
             | `Opt_exp_rep_COMMA_exp_SEMI (v1, v2) ->
                 let v1 =
@@ -918,8 +921,8 @@ and statement_aux env x : Ast_java.stmt list =
           let v3 = block env v3 in
           [ Sync (v1, v2, v3) ]
       | `Local_var_decl x ->
-          let xs = local_variable_declaration env x in
-          [ LocalVarList xs ]
+          let xs, sc = local_variable_declaration env x in
+          [ LocalVarList (xs, sc) ]
       | `Throw_stmt (v1, v2, v3) ->
           let v1 = token env v1 (* "throw" *) in
           let v2 = expression env v2 in
@@ -1301,11 +1304,12 @@ and class_body_decl env (x : CST.class_body_declaration) =
       | `Cons_decl x -> [ Method (constructor_declaration env x) ]
       | `SEMI tok -> [ EmptyDecl (token env tok) (* ";" *) ])
   | `Semg_ellips tok -> [ DeclEllipsis (token env tok) ]
+  | `Semg_named_ellips tok -> [ DeclMetavarEllipsis (str env tok) ]
 
 and enum_body_declarations (env : env) ((v1, v2) : CST.enum_body_declarations) =
   let _v1 = token env v1 (* ";" *) in
   let v2 = List_.map (fun x -> class_body_decl env x) v2 in
-  List.flatten v2
+  List_.flatten v2
 
 and enum_constant (env : env) ((v1, v2, v3, v4) : CST.enum_constant) =
   let _v1 = modifiers_opt env v1 in
@@ -1457,7 +1461,7 @@ and class_body (env : env) ((v1, v2, v3) : CST.class_body) =
   let v1 = token env v1 (* "{" *) in
   let v2 = List_.map (fun x -> class_body_decl env x) v2 in
   let v3 = token env v3 (* "}" *) in
-  (v1, List.flatten v2, v3)
+  (v1, List_.flatten v2, v3)
 
 and static_initializer (env : env) ((v1, v2) : CST.static_initializer) =
   let v1 = token env v1 (* "static" *) in
@@ -1567,7 +1571,7 @@ and annotation_type_body (env : env) ((v1, v2, v3) : CST.annotation_type_body) =
       v2
   in
   let v3 = token env v3 (* "}" *) in
-  (v1, List.flatten v2, v3)
+  (v1, List_.flatten v2, v3)
 
 and annotation_type_element_declaration (env : env)
     ((v1, v2, v3, v4, v5, v6, v7, v8) : CST.annotation_type_element_declaration)
@@ -1649,7 +1653,7 @@ and interface_body (env : env) ((v1, v2, v3) : CST.interface_body) =
       v2
   in
   let v3 = token env v3 (* "}" *) in
-  (v1, List.flatten v2, v3)
+  (v1, List_.flatten v2, v3)
 
 and constant_declaration (env : env)
     ((v1, v2, v3, v4) : CST.constant_declaration) =
@@ -1845,6 +1849,8 @@ and formal_parameter (env : env) (x : CST.formal_parameter) =
   | `Semg_ellips tok ->
       let tok = (* "..." *) token env tok in
       ParamEllipsis tok
+  | `Semg_named_ellips tok ->
+      ParamClassic (AST.canon_var [] None (IdentDecl (str env tok)))
 
 and receiver_parameter (env : env) ((v1, v2, v3, v4) : CST.receiver_parameter) =
   let _v1 = List_.map (annotation env) v1 in
@@ -1884,12 +1890,13 @@ and throws (env : env) ((v1, v2, v3) : CST.throws) : typ list =
   v2 :: v3
 
 and local_variable_declaration (env : env)
-    ((v1, v2, v3, v4) : CST.local_variable_declaration) : var_with_init list =
+    ((v1, v2, v3, v4) : CST.local_variable_declaration) :
+    var_with_init list * sc =
   let v1 = modifiers_opt env v1 in
   let v2 = unannotated_type env v2 in
   let v3 = variable_declarator_list env v3 in
-  let _v4 = token env v4 (* ";" *) in
-  decls (fun x -> x) v1 v2 v3
+  let sc = token env v4 (* ";" *) in
+  (decls (fun x -> x) v1 v2 v3, sc)
 
 and method_declaration (env : env) ((v1, v2, v3) : CST.method_declaration) =
   let v1 = modifiers_opt env v1 in
@@ -1917,7 +1924,7 @@ let partials (env : env) (x : CST.partials) =
              m_body = v3;
            })
 
-let program (env : env) file (x : CST.program) =
+let program (env : env) (file : Fpath.t) (x : CST.program) =
   match x with
   | `Rep_stmt xs ->
       let tok = Tok.first_tok_of_file file in
@@ -1932,8 +1939,8 @@ let program (env : env) file (x : CST.program) =
 
 let parse file =
   H.wrap_parser
-    (fun () -> Tree_sitter_java.Parse.file file)
-    (fun cst ->
+    (fun () -> Tree_sitter_java.Parse.file !!file)
+    (fun cst _extras ->
       let env = { H.file; conv = H.line_col_to_pos file; extra = () } in
       match program env file cst with
       | AProgram xs -> xs
@@ -1942,7 +1949,7 @@ let parse file =
 let parse_pattern str =
   H.wrap_parser
     (fun () -> Tree_sitter_java.Parse.string str)
-    (fun cst ->
-      let file = "<pattern>" in
-      let env = { H.file; conv = Hashtbl.create 0; extra = () } in
+    (fun cst _extras ->
+      let file = Fpath.v "<pattern>" in
+      let env = { H.file; conv = H.line_col_to_pos_pattern str; extra = () } in
       program env file cst)

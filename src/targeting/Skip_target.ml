@@ -2,7 +2,8 @@
    Skip targets.
 *)
 open Common
-module Resp = Semgrep_output_v1_t
+open Fpath_.Operators
+module Out = Semgrep_output_v1_t
 
 (****************************************************************************)
 (* Minified files detection (via whitespace stats) *)
@@ -27,6 +28,7 @@ module Resp = Semgrep_output_v1_t
   is that Semgrep would likely take longer as it scans more costly minified
   files. TODO we might want to do some benchmarking and change this default
 *)
+(* coupling: this number is iuncluded in Scan_CLI.ml's docs *)
 let min_whitespace_frequency = 0.07
 
 (*
@@ -86,7 +88,7 @@ let is_minified (path : Fpath.t) =
       if stat.ws_freq < min_whitespace_frequency then
         Error
           {
-            Resp.path;
+            Out.path;
             reason = Minified;
             details =
               Some
@@ -99,7 +101,7 @@ let is_minified (path : Fpath.t) =
       else if stat.line_freq < min_line_frequency then
         Error
           {
-            Resp.path;
+            Out.path;
             reason = Minified;
             details =
               Some
@@ -113,7 +115,7 @@ let is_minified (path : Fpath.t) =
       else Ok path
     else Ok path
 
-let exclude_minified_files paths = Result_.partition_result is_minified paths
+let exclude_minified_files paths = Result_.partition is_minified paths
 
 (****************************************************************************)
 (* Big file filtering *)
@@ -127,20 +129,77 @@ let exclude_minified_files paths = Result_.partition_result is_minified paths
    We could configure the size limit based on a per-language basis if we
    know that a language parser can handle larger files.
 *)
-let exclude_big_files paths =
-  let max_bytes = !Flag_semgrep.max_target_bytes in
-  paths
-  |> Result_.partition_result (fun path ->
-         let size = UFile.filesize path in
-         if max_bytes > 0 && size > max_bytes then
-           Error
-             {
-               Resp.path;
-               reason = Too_big;
-               details =
-                 Some
-                   (spf "target file size exceeds %i bytes at %i bytes"
-                      max_bytes size);
-               rule_id = None;
-             }
-         else Ok path)
+let is_big max_bytes path =
+  let size = UFile.filesize path in
+  if max_bytes > 0 && size > max_bytes then
+    Error
+      {
+        Out.path;
+        reason = Too_big;
+        details =
+          Some
+            (spf "target file size exceeds %i bytes at %i bytes" max_bytes size);
+        rule_id = None;
+      }
+  else Ok path
+
+let exclude_big_files max_target_bytes paths =
+  let max_bytes = max_target_bytes in
+  paths |> Result_.partition (is_big max_bytes)
+
+(*************************************************************************)
+(* Access permission filtering *)
+(*************************************************************************)
+(*
+   Filter out folders and files that don't have sufficient access permissions.
+
+   For Git projects, we only filter on regular files since folders are not
+   returned to us by 'git ls-files'. This is why semgrep won't report folders
+   with insufficient permissions for Git projects.
+
+   For other projects, we scan the file tree ourselves and need to check
+   folder permissions (read+execute on Unix, read on Windows).
+*)
+
+let skip_inaccessible_dir_path fpath : Out.skipped_target =
+  {
+    Out.path = fpath;
+    reason = Insufficient_permissions;
+    details = Some "folder lacks sufficient access permissions";
+    rule_id = None;
+  }
+
+let skip_inaccessible_file_path fpath : Out.skipped_target =
+  {
+    Out.path = fpath;
+    reason = Insufficient_permissions;
+    details = Some "file lacks sufficient access permissions";
+    rule_id = None;
+  }
+
+let dir_has_access_permissions (dir : Fpath.t) =
+  try
+    Unix.access !!dir [ R_OK; X_OK ];
+    true
+  with
+  | Unix.Unix_error _ -> false
+
+let file_has_access_permissions (file : Fpath.t) =
+  try
+    Unix.access !!file [ R_OK ];
+    true
+  with
+  | Unix.Unix_error _ -> false
+
+let filter_dir_access_permissions (dir : Fpath.t) :
+    (Fpath.t, Out.skipped_target) result =
+  if dir_has_access_permissions dir then Ok dir
+  else Error (skip_inaccessible_dir_path dir)
+
+let filter_file_access_permissions (file : Fpath.t) :
+    (Fpath.t, Out.skipped_target) result =
+  if file_has_access_permissions file then Ok file
+  else Error (skip_inaccessible_file_path file)
+
+let exclude_inaccessible_files files =
+  Result_.partition filter_file_access_permissions files

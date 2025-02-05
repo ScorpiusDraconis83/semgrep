@@ -14,6 +14,7 @@
  *)
 open Common
 open IL
+module Log = Log_analyzing.Log
 module G = AST_generic
 module H = AST_generic_helpers
 module F = IL
@@ -21,8 +22,9 @@ module D = Dataflow_core
 module Var_env = Dataflow_var_env
 module VarMap = Var_env.VarMap
 module LV = IL_helpers
+module Eval = Eval_il_partial
 
-let logger = Logging.get_logger [ __MODULE__ ]
+let tags = Log_analyzing.svalue_tag
 
 (*****************************************************************************)
 (* Types *)
@@ -39,327 +41,19 @@ module DataflowX = Dataflow_core.Make (struct
   let short_string_of_node n = Display_IL.short_string_of_node_kind n.F.n
 end)
 
-type constness = Constant | NotConstant [@@deriving show]
-
 (*****************************************************************************)
 (* Hooks *)
 (*****************************************************************************)
 
-let hook_constness_of_function = ref None
-let hook_transfer_of_assume = ref None
-
-(*****************************************************************************)
-(* Error management *)
-(*****************************************************************************)
-
-let warning _tok s =
-  (* TODO: Report these errors as matches of a builtin_div_by_zero rule. *)
-  logger#warning "CFGError: %s" s
-
-(*****************************************************************************)
-(* Helpers *)
-(*****************************************************************************)
-
-let fb = Tok.unsafe_fake_bracket
+let hook_constness_of_function = Hook.create None
+let hook_transfer_of_assume = Hook.create None
 
 (*****************************************************************************)
 (* Constness *)
 (*****************************************************************************)
 
-let result_of_function_call_is_constant lang f args =
-  match (lang, f, args) with
-  (* Built-in knowledge, we know these functions return constants when
-     * given constant arguments. *)
-  | ( Lang.Php,
-      {
-        e =
-          Fetch
-            {
-              base =
-                Var
-                  {
-                    ident = ("escapeshellarg" | "htmlspecialchars_decode"), _;
-                    _;
-                  };
-              rev_offset = [];
-            };
-        _;
-      },
-      [ (G.Lit (G.String _) | G.Cst G.Cstr) ] ) ->
-      true
-  (* Pro/Interfile: Look up inferred constness of the function *)
-  | _lang, { e = Fetch _; eorig = SameAs eorig }, _args -> (
-      match !hook_constness_of_function with
-      | Some constness_of_func -> (
-          match constness_of_func eorig with
-          | Some Constant -> true
-          | Some NotConstant
-          | None ->
-              false)
-      | None -> false)
-  | __else__ -> false
-
-let eq_literal l1 l2 = G.equal_literal l1 l2
-let eq_ctype t1 t2 = t1 =*= t2
-
-let ctype_of_literal = function
-  | G.Bool _ -> G.Cbool
-  | G.Int _ -> G.Cint
-  | G.String _ -> G.Cstr
-  | ___else___ -> G.Cany
-
-let eq c1 c2 =
-  match (c1, c2) with
-  | G.Lit l1, G.Lit l2 -> eq_literal l1 l2
-  | G.Cst t1, G.Cst t2 -> eq_ctype t1 t2
-  | G.Sym e1, G.Sym e2 ->
-      (* We only consider two `Sym`s equal when they are exactly the same. If two
-       * `Sym`s are structuraly equal but their `id_svalue` pointers are different
-       * it may not be safe to use them interchangeably. (TBH I'm not sure if/when
-       * it's safe so I'm erring on the side of caution!) *)
-      phys_equal e1 e2
-  | G.NotCst, G.NotCst -> true
-  | G.Lit _, _
-  | G.Cst _, _
-  | G.Sym _, _
-  | G.NotCst, _ ->
-      false
-
-let union_ctype t1 t2 = if eq_ctype t1 t2 then t1 else G.Cany
-
-(* aka merge *)
-let union c1 c2 =
-  match (c1, c2) with
-  | _any, G.NotCst
-  | G.NotCst, _any ->
-      G.NotCst
-  | c1, c2 when eq c1 c2 -> c1
-  (* Note that merging symbolic expressions can be tricky.
-   *
-   * Example: Both branches assign `y = x.foo`, but `x` may have a different
-   * value in each branch. When merging symbolic expressions like `x.foo` we
-   * must first merge their dependencies (in our example, `x`).
-   *
-   *     if c:
-   *       x = a
-   *       y = x.foo
-   *     else:
-   *       x = b
-   *       y = x.foo
-   *
-   * Example: If we are not careful, when analyzing loops, we could introduce
-   * circular dependencies! (See tests/rules/sym_prop_no_merge1.go)
-   *
-   *     for cond {
-   *       x = f(x)
-   *     }
-   *)
-  | _any, G.Sym _
-  | G.Sym _, _any ->
-      G.NotCst
-  | G.Lit l1, G.Lit l2 ->
-      let t1 = ctype_of_literal l1 and t2 = ctype_of_literal l2 in
-      G.Cst (union_ctype t1 t2)
-  | G.Lit l1, G.Cst t2
-  | G.Cst t2, G.Lit l1 ->
-      let t1 = ctype_of_literal l1 in
-      G.Cst (union_ctype t1 t2)
-  | G.Cst t1, G.Cst t2 -> G.Cst (union_ctype t1 t2)
-
-(* THINK: This assumes that analyses are sound... but they are not
-   (e.g. due to aliasing). *)
-let refine c1 c2 =
-  match (c1, c2) with
-  | _ when eq c1 c2 -> c1
-  | c, G.NotCst
-  | G.NotCst, c ->
-      c
-  | G.Lit _, _
-  | G.Cst _, G.Cst _
-  | G.Sym _, G.Sym _ ->
-      c1
-  | G.Cst _, G.Sym _ -> c1
-  | G.Cst _, G.Lit _ -> c2
-  | G.Sym _, G.Lit _
-  | G.Sym _, G.Cst _ ->
-      c2
-
-(*****************************************************************************)
-(* Constness evaluation *)
-(*****************************************************************************)
-
-let literal_of_bool b =
-  let b_str = string_of_bool b in
-  (* TODO: use proper token when possible? *)
-  let tok = Tok.unsafe_fake_tok b_str in
-  G.Bool (b, tok)
-
-let literal_of_int i64 =
-  (* TODO: use proper token when possible? *)
-  G.Int (Parsed_int.of_int64 i64)
-
-let int_of_literal = function
-  | G.Int (opt, _) -> opt
-  | ___else___ -> None
-
-let literal_of_string ?tok s : G.literal =
-  let tok =
-    match tok with
-    | None -> Tok.unsafe_fake_tok s
-    | Some tok ->
-        (* THIHK: IMO this should be `Parse_info.fake_info tok s`. Yet right now
-         * we are picking an arbitrary token from one of the strings involved in
-         * computing `s` and prentending it is a real token for `s`, but it's NOT.
-         * This may not interact well with Autofix (?). Anyways for now we have
-         * to do this because an $MVAR could match `s` and Semgrep assumes that
-         * an $MVAR always has a source location. *)
-        tok
-  in
-  G.String (fb (s, tok))
-
-let eval_unop_bool op b =
-  match op with
-  | G.Not -> G.Lit (literal_of_bool (not b))
-  | _else -> G.Cst G.Cbool
-
-let eval_binop_bool op b1 b2 =
-  match op with
-  | G.Or -> G.Lit (literal_of_bool (b1 || b2))
-  | G.And -> G.Lit (literal_of_bool (b1 && b2))
-  | _else -> G.Cst G.Cbool
-
-let eval_unop_int op opt_i =
-  match (op, opt_i) with
-  | G.Plus, Some i -> G.Lit (literal_of_int i)
-  | G.Minus, Some i -> G.Lit (literal_of_int (Int64.neg i))
-  | ___else____ -> G.Cst G.Cint
-
-(* This reduces arithmetic "exceptions" to `G.Cst G.Cint`, it does NOT
- * detect overflows for any other language than OCaml. Note that OCaml
- * integers have just 63-bits in 64-bit architectures!
- *)
-let eval_binop_int tok op opt_i1 opt_i2 =
-  let open Int64_ in
-  let sign_bit i = i asr Int.sub Sys.int_size 1 =|= 1L in
-  match (op, opt_i1, opt_i2) with
-  | G.Plus, Some i1, Some i2 ->
-      let r = i1 + i2 in
-      if sign_bit i1 =:= sign_bit i2 && sign_bit r <> sign_bit i1 then
-        G.Cst G.Cint (* overflow *)
-      else G.Lit (literal_of_int (i1 + i2))
-  | G.Minus, Some i1, Some i2 ->
-      let r = i1 - i2 in
-      if sign_bit i1 <> sign_bit i2 && sign_bit r <> sign_bit i1 then
-        G.Cst G.Cint (* overflow *)
-      else G.Lit (literal_of_int (i1 - i2))
-  | G.Mult, Some i1, Some i2 ->
-      let overflow =
-        i1 <> 0L && i2 <> 0L
-        && ((i1 < 0L && i2 =|= min_int) (* >max_int *)
-           || (i1 =|= min_int && i2 < 0L) (* >max_int *)
-           ||
-           if sign_bit i1 =:= sign_bit i2 then abs i1 > abs (max_int / i2)
-             (* >max_int *)
-           else abs i1 > abs (min_int / i2) (* <min_int *))
-      in
-      if overflow then G.Cst G.Cint else G.Lit (literal_of_int (i1 * i2))
-  | G.Div, Some i1, Some i2 -> (
-      if i1 =|= min_int && i2 =|= -1L then
-        G.Cst G.Cint (* = max_int+1, overflow *)
-      else
-        try G.Lit (literal_of_int (i1 / i2)) with
-        | Division_by_zero ->
-            warning tok "Found division by zero";
-            G.Cst G.Cint)
-  | ___else____ -> G.Cst G.Cint
-
-let eval_binop_string ?tok op s1 s2 =
-  match op with
-  | G.Plus
-  | G.Concat ->
-      G.Lit (literal_of_string ?tok (s1 ^ s2))
-  | __else__ -> G.Cst G.Cstr
-
-let rec eval (env : G.svalue Var_env.t) exp : G.svalue =
-  match exp.e with
-  | Fetch lval -> eval_lval env lval
-  | Literal li -> G.Lit li
-  (* Python: cond and <then-exp> or <else-exp> *)
-  | Operator
-      ( ((Or, _) as op),
-        ([
-           Unnamed { e = Operator ((And, _), [ _cond; Unnamed a_then ]); _ };
-           Unnamed a_else;
-         ] as args) ) -> (
-      let c_then = eval env a_then in
-      let c_else = eval env a_else in
-      match (c_then, c_else) with
-      | G.Lit (G.String _), G.Lit (G.String _) -> G.Cst G.Cstr
-      | G.Lit (G.Int _), G.Lit (G.Int _) -> G.Cst G.Cstr
-      (* Fall-back to default evaluation strategy. *)
-      | __else__ -> eval_op env op args)
-  | Operator (op, args) -> eval_op env op args
-  | Composite _
-  | Record _
-  | Cast _
-  | FixmeExp _ ->
-      G.NotCst
-
-and eval_lval env lval =
-  match lval with
-  | { base = Var x; rev_offset = [] } -> (
-      let opt_c = VarMap.find_opt (IL.str_of_name x) env in
-      match (!(x.id_info.id_svalue), opt_c) with
-      | None, None -> G.NotCst
-      | Some c, None
-      | None, Some c ->
-          c
-      | Some c1, Some c2 -> refine c1 c2)
-  | ___else___ -> G.NotCst
-
-and eval_op env wop args =
-  let op, tok = wop in
-  let cs = args |> List_.map IL_helpers.exp_of_arg |> List_.map (eval env) in
-  match (op, cs) with
-  | G.Plus, [ c1 ] -> c1
-  | op, [ G.Lit (G.Bool (b, _)) ] -> eval_unop_bool op b
-  | op, [ G.Lit (G.Int _ as li) ] -> eval_unop_int op (int_of_literal li)
-  | G.And, [ G.Lit (G.Bool (true, _)); c ] -> c (* Python: True and 42 -> 42 *)
-  | G.Or, [ G.Lit (G.Bool (false, _)); c ] -> c (* Python: False or 42 -> 42 *)
-  | op, [ G.Lit (G.Bool (b1, _)); G.Lit (G.Bool (b2, _)) ] ->
-      eval_binop_bool op b1 b2
-  | op, [ G.Lit (G.Int _ as li1); G.Lit (G.Int _ as li2) ] ->
-      eval_binop_int tok op (int_of_literal li1) (int_of_literal li2)
-  | op, [ G.Lit (G.String (_, (s1, _), _)); G.Lit (G.String (_, (s2, _), _)) ]
-    ->
-      eval_binop_string ~tok op s1 s2
-  | _op, [ (G.Cst _ as c1) ] -> c1
-  | _op, [ G.Cst t1; G.Cst t2 ] -> G.Cst (union_ctype t1 t2)
-  | _op, [ G.Lit l1; G.Cst t2 ]
-  | _op, [ G.Cst t2; G.Lit l1 ] ->
-      let t1 = ctype_of_literal l1 in
-      G.Cst (union_ctype t1 t2)
-  | ___else___ -> G.NotCst
-
-and eval_concat env args =
-  match List_.map (eval env) args with
-  | [] -> G.Lit (literal_of_string "")
-  | G.Lit (G.String (_, (r, tok), _)) :: args' ->
-      List.fold_left
-        (fun res e ->
-          match (res, e) with
-          | G.Lit (G.String (_l, (x, tok), _r)), G.Lit (G.String (_, (s, _), _))
-            ->
-              (* should reuse l/r? *)
-              G.Lit (literal_of_string ~tok (x ^ s))
-          | (G.Lit _ | G.Cst _), G.Cst G.Cstr -> G.Cst G.Cstr
-          | _____else_____ -> G.NotCst)
-        (G.Lit (literal_of_string ~tok r))
-        args'
-  | ___else___ -> G.NotCst
-
 let eval_format env args =
-  let cs = List_.map (eval env) args in
+  let cs = List_.map (Eval.eval env) args in
   if
     cs
     |> List.for_all (function
@@ -392,6 +86,39 @@ let eval_builtin_func lang env func args =
       | __else__ -> None)
   | __else__ -> None
 
+let result_of_function_call_constant lang f args =
+  match (lang, f, args) with
+  (* Built-in knowledge, we know these functions return constants when
+     * given constant arguments. *)
+  | ( Lang.Php,
+      {
+        e =
+          Fetch
+            {
+              base =
+                Var
+                  {
+                    ident = ("escapeshellarg" | "htmlspecialchars_decode"), _;
+                    _;
+                  };
+              rev_offset = [];
+            };
+        _;
+      },
+      [ (G.Lit (G.String _) | G.Cst G.Cstr) ] ) ->
+      Some (G.Cst G.Cstr)
+  (* Pro/Interfile: Look up inferred constness of the function *)
+  | _lang, { e = Fetch _; eorig = SameAs eorig }, _args -> (
+      match Hook.get hook_constness_of_function with
+      | Some constness_of_func -> (
+          match constness_of_func eorig with
+          | Some G.NotCst
+          | None ->
+              None
+          | Some svalue -> Some svalue)
+      | None -> None)
+  | __else__ -> None
+
 (*****************************************************************************)
 (* Symbolic evaluation *)
 (*****************************************************************************)
@@ -405,9 +132,10 @@ let eval_builtin_func lang env func args =
  *)
 let rec is_symbolic_expr expr =
   match expr.G.e with
-  | G.L _ -> true
-  | G.N _ -> true
-  | G.IdSpecial _ -> true
+  | G.L _
+  | G.N _
+  | G.Special _ ->
+      true
   | G.Cast (_, _, e)
   | G.DotAccess (e, _, FN _) ->
       is_symbolic_expr e
@@ -417,7 +145,8 @@ let rec is_symbolic_expr expr =
   | G.New (_, _, _, args) ->
       let args = Tok.unbracket args in
       List.for_all is_symbolic_arg args
-  | _else -> false
+  | G.Record (_, fields, _) -> List.for_all is_symbolic_field fields
+  | __else__ -> false
 
 and is_symbolic_arg arg =
   match arg with
@@ -428,13 +157,25 @@ and is_symbolic_arg arg =
   | G.ArgType _ -> true
   | G.OtherArg _ -> false
 
+and is_symbolic_field field =
+  match field with
+  | G.F
+      {
+        s =
+          G.DefStmt
+            ({ name = G.EN _; _ }, G.FieldDefColon { vinit = Some expr; _ });
+        _;
+      } ->
+      is_symbolic_expr expr
+  | __else__ -> false
+
 let sym_prop eorig =
   match eorig with
   | SameAs e_gen when is_symbolic_expr e_gen -> G.Sym e_gen
   | ___else___ -> G.NotCst
 
 let eval_or_sym_prop env exp =
-  match eval env exp with
+  match Eval.eval env exp with
   | G.NotCst -> sym_prop exp.eorig
   | c -> c
 
@@ -501,8 +242,10 @@ let set_svalue_ref id_info c' =
   if no_cycles_in_svalue id_info c' then
     match !(id_info.id_svalue) with
     | None -> id_info.id_svalue := Some c'
-    | Some c -> id_info.id_svalue := Some (refine c c')
-  else logger#info "Cycle check failed for %s := ..." (G.show_id_info id_info)
+    | Some c -> id_info.id_svalue := Some (Eval.refine c c')
+  else
+    Log.debug (fun m ->
+        m ~tags "Cycle check failed for %s := ..." (G.show_id_info id_info))
 (* (G.show_svalue c') *)
 
 (*****************************************************************************)
@@ -533,7 +276,7 @@ let union_env =
   VarMap.merge (fun _ c1_opt c2_opt ->
       let* c1 = c1_opt in
       let* c2 = c2_opt in
-      Some (union c1 c2))
+      Some (Eval.union c1 c2))
 
 let input_env ~enter_env ~(flow : F.cfg) mapping ni =
   let node = flow.graph#nodes#assoc ni in
@@ -574,18 +317,20 @@ let update_env_with env var sval =
 (* Semgrep Pro *)
 let transfer_of_assume (assume : bool) (cond : IL.exp_kind)
     (inp : G.svalue Var_env.t) : G.svalue Var_env.t =
-  match !hook_transfer_of_assume with
+  match Hook.get hook_transfer_of_assume with
   | None -> inp
   | Some hook -> hook assume cond inp
 
-let transfer :
+let rec transfer :
     lang:Lang.t ->
     enter_env:G.svalue Var_env.t ->
-    flow:F.cfg ->
+    fun_cfg:F.fun_cfg ->
     G.svalue Var_env.transfn =
- fun ~lang ~enter_env ~flow
+ fun ~lang ~enter_env ~fun_cfg
      (* the transfer function to update the mapping at node index ni *)
        mapping ni ->
+  let flow = fun_cfg.cfg in
+
   let node = flow.graph#nodes#assoc ni in
 
   let inp' = input_env ~enter_env ~flow mapping ni in
@@ -598,7 +343,6 @@ let transfer :
     | NCond _
     | NGoto _
     | NReturn _
-    | NLambda _
     | NThrow _
     | NOther _
     | NTodo _ ->
@@ -606,29 +350,33 @@ let transfer :
     | TrueNode cond -> transfer_of_assume true cond.e inp'
     | FalseNode cond -> transfer_of_assume false cond.e inp'
     | NInstr instr -> (
+        let eval_env = Eval.mk_env lang inp' in
+
         (* TODO: For now we only handle the simplest cases. *)
         match instr.i with
         | Assign ({ base = Var var; rev_offset = [] }, exp) ->
             (* var = exp *)
-            let cexp = eval_or_sym_prop inp' exp in
+            let cexp = eval_or_sym_prop eval_env exp in
             update_env_with inp' var cexp
         | Call (Some { base = Var var; rev_offset = [] }, func, args) -> (
             let args_val =
-              List_.map (fun arg -> eval inp' (IL_helpers.exp_of_arg arg)) args
+              List_.map
+                (fun arg -> Eval.eval eval_env (IL_helpers.exp_of_arg arg))
+                args
             in
-            if result_of_function_call_is_constant lang func args_val then
-              VarMap.add (IL.str_of_name var) (G.Cst G.Cstr) inp'
-            else
-              match eval_builtin_func lang inp' func args with
-              | None
-              | Some NotCst ->
-                  (* symbolic propagation *)
-                  (* Call to an arbitrary function, we are intraprocedural so we cannot
-                   * propagate actual constants in this case, but we can propagate the
-                   * call itself as a symbolic expression. *)
-                  let ccall = sym_prop instr.iorig in
-                  update_env_with inp' var ccall
-              | Some cexp -> update_env_with inp' var cexp)
+            match result_of_function_call_constant lang func args_val with
+            | Some svalue -> VarMap.add (IL.str_of_name var) svalue inp'
+            | None -> (
+                match eval_builtin_func lang eval_env func args with
+                | None
+                | Some NotCst ->
+                    (* symbolic propagation *)
+                    (* Call to an arbitrary function, we are intraprocedural so we cannot
+                     * propagate actual constants in this case, but we can propagate the
+                     * call itself as a symbolic expression. *)
+                    let ccall = sym_prop instr.iorig in
+                    update_env_with inp' var ccall
+                | Some cexp -> update_env_with inp' var cexp))
         | New ({ base = Var var; rev_offset = [] }, _ty, _ii, _args) ->
             update_env_with inp' var (sym_prop instr.iorig)
         | CallSpecial
@@ -638,7 +386,7 @@ let transfer :
               (* We try to evaluate the special function, if we know how. *)
               if special =*= Concat then
                 (* var = concat(args) *)
-                eval_concat inp' args
+                Eval.eval_concat eval_env args
               else G.NotCst
             in
             let cexp =
@@ -669,23 +417,74 @@ let transfer :
             | None -> inp'
             | Some lvar -> VarMap.remove (IL.str_of_name lvar) inp'))
   in
-
+  let out' = do_lambdas lang fun_cfg.lambdas out' node in
   { D.in_env = inp'; out_env = out' }
+
+and do_lambdas lang lambdas in_env node =
+  (* In svalue-analysis we only need to visit lambdas at definition site,
+   * we simply propagate svalues into the lambda's body, but whatever
+   * happens inside the lambda is not visible outside it. *)
+  match node.F.n with
+  | NInstr { i = AssignAnon (lval, Lambda _); _ } -> (
+      match LV.lval_is_lambda lambdas lval with
+      | Some (_name, lambda_cfg) ->
+          let mapping = fixpoint_with_env lang in_env lambda_cfg in
+          update_svalue lambda_cfg.cfg mapping;
+          let lambda_env =
+            mapping.(lambda_cfg.cfg.exit).Dataflow_core.out_env
+          in
+          let out_env =
+            (* We look at the svalue info resulting from analyzing the lambda's
+               * body, and we kill the svalue info of any variables that may be altered
+               * by the execution of the lambda. *)
+            VarMap.merge
+              (fun _var opt_env opt_lam ->
+                match (opt_env, opt_lam) with
+                | Some sval1, Some sval2 when Eval.eq sval1 sval2 ->
+                    (* Nothing changed so we keep the same svalue info. *)
+                    opt_env
+                (* Either the svalue of 'var' changed or it was deemed non-constant
+                 * (see 'update_env_with'), once the lambda is defined we don't know
+                 * when it's going to execute, so we just kill the svalue info.
+                 * (We could do better.) *)
+                | Some _, Some _
+                | Some _, None ->
+                    None
+                (* Some new constant was found inside the lambda, but we ignore those
+                 * outside the lambda. *)
+                | None, Some _ -> None
+                (* Cannot happen, just to please the compiler. *)
+                | None, None -> None)
+              in_env lambda_env
+          in
+          out_env
+      | None -> in_env)
+  | __else__ -> in_env
+
+and fixpoint_with_env lang enter_env fun_cfg =
+  let flow = fun_cfg.cfg in
+  let mapping, timeout =
+    DataflowX.fixpoint ~timeout:Limits_semgrep.svalue_prop_FIXPOINT_TIMEOUT
+      ~eq_env:(Var_env.eq_env Eval.eq)
+      ~init:(DataflowX.new_node_array flow (Var_env.empty_inout ()))
+      ~trans:(transfer ~lang ~enter_env ~fun_cfg)
+        (* svalue is a forward analysis! *)
+      ~forward:true ~flow
+  in
+  if timeout =*= `Timeout then
+    Log.warn (fun m -> m "Fixpoint timeout while performing svalue-propagation");
+  mapping
 
 (*****************************************************************************)
 (* Entry point *)
 (*****************************************************************************)
 
-let (fixpoint : Lang.t -> IL.name list -> F.cfg -> mapping) =
- fun lang _inputs flow ->
+and (fixpoint : Lang.t -> IL.fun_cfg -> mapping) =
+ fun lang fun_cfg ->
   let enter_env = VarMap.empty in
-  DataflowX.fixpoint ~timeout:Limits_semgrep.svalue_prop_FIXPOINT_TIMEOUT
-    ~eq_env:(Var_env.eq_env eq)
-    ~init:(DataflowX.new_node_array flow (Var_env.empty_inout ()))
-    ~trans:(transfer ~lang ~enter_env ~flow) (* svalue is a forward analysis! *)
-    ~forward:true ~flow
+  fixpoint_with_env lang enter_env fun_cfg
 
-let update_svalue (flow : F.cfg) mapping =
+and update_svalue (flow : F.cfg) mapping =
   flow.graph#nodes#keys
   |> List.iter (fun ni ->
          let ni_info = mapping.(ni) in

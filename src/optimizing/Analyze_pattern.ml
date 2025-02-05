@@ -52,7 +52,7 @@ let extract_strings_and_mvars ?lang any =
 
       method! visit_ident _env (str, _tok) =
         match () with
-        | _ when Metavariable.is_metavar_name str -> Stack_.push str mvars
+        | _ when Mvar.is_metavar_name str -> Stack_.push str mvars
         | _ when not (Pattern.is_special_identifier ?lang str) ->
             Stack_.push str strings
         | _ -> ()
@@ -72,11 +72,11 @@ let extract_strings_and_mvars ?lang any =
         | { d = ImportAs (_, FileName (str, _), _); _ }
         | { d = ImportAll (_, FileName (str, _), _); _ }
           when str <> "..."
-               && (not (Metavariable.is_metavar_name str))
+               && (not (Mvar.is_metavar_name str))
                && (* deprecated *) not (Pattern.is_regexp_string str) ->
             (* Semgrep can match "foo" against "foo/bar", so we just
              * overapproximate taking the sub-strings, see
-             * Generic_vs_generic.m_module_name_prefix. *)
+             * Pattern_vs_code.m_module_name_prefix. *)
             String_.split ~sep:{|/\|\\|} str
             |> List.iter (fun s -> Stack_.push s strings);
             super#visit_directive env x
@@ -96,11 +96,11 @@ let extract_strings_and_mvars ?lang any =
              * e.g. `"foo" + "bar"`. *)
             super#visit_expr env x
         | Call
-            ( { e = IdSpecial (Require, _); _ },
+            ( { e = Special (Require, _); _ },
               (_, [ Arg { e = L (String (_, (str, _tok), _)); _ } ], _) ) ->
             if not (Pattern.is_special_string_literal str) then
               Stack_.push str strings
-        | IdSpecial (Eval, t) ->
+        | Special (Eval, t) ->
             if Tok.is_origintok t then
               Stack_.push (Tok.content_of_tok t) strings
         | TypedMetavar (_, _, type_) -> (
@@ -157,14 +157,14 @@ let extract_mvars_in_id_position ?lang:_ any =
         | { d = ImportFrom (_, FileName (str, _), _); _ }
         | { d = ImportAs (_, FileName (str, _), _); _ }
         | { d = ImportAll (_, FileName (str, _), _); _ }
-          when Metavariable.is_metavar_name str ->
+          when Mvar.is_metavar_name str ->
             mvars := MvarSet.add str !mvars;
             super#visit_directive env x
         | _ -> super#visit_directive env x
 
       method! visit_type_kind env x =
         match x with
-        | TyN (Id ((str, _tok), _ii)) when Metavariable.is_metavar_name str ->
+        | TyN (Id ((str, _tok), _ii)) when Mvar.is_metavar_name str ->
             mvars := MvarSet.add str !mvars
         | _ -> super#visit_type_kind env x
 
@@ -173,7 +173,7 @@ let extract_mvars_in_id_position ?lang:_ any =
         | Call ({ e = N (Id ((str, _tok), _ii)); _ }, _)
         | New (_, { t = TyN (Id ((str, _tok), _ii)); _ }, _, _)
         | DotAccess (_, _, FN (Id ((str, _tok), _ii)))
-          when Metavariable.is_metavar_name str ->
+          when Mvar.is_metavar_name str ->
             mvars := MvarSet.add str !mvars
         | _ -> super#visit_expr env x
     end

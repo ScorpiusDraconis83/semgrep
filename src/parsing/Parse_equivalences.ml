@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2019-2021 r2c
+ * Copyright (C) 2019-2021 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -73,8 +73,14 @@ let parse file =
                                  (spf "could not parse the equivalence: %s" str)
                          in
                          let left =
-                           try Parse_pattern.parse_pattern lang left with
-                           | exn ->
+                           match Parse_pattern.parse_pattern lang left with
+                           | Ok x -> x
+                           | Error s ->
+                               error
+                                 (spf
+                                    "could not parse the left pattern: %s (%s)"
+                                    left s)
+                           | exception exn ->
                                error
                                  (spf
                                     "could not parse the left pattern: %s (exn \
@@ -82,8 +88,14 @@ let parse file =
                                     left (Common.exn_to_s exn))
                          in
                          let right =
-                           try Parse_pattern.parse_pattern lang right with
-                           | exn ->
+                           match Parse_pattern.parse_pattern lang right with
+                           | Ok x -> x
+                           | Error s ->
+                               error
+                                 (spf
+                                    "could not parse the right pattern: %s (%s)"
+                                    right s)
+                           | exception exn ->
                                error
                                  (spf
                                     "could not parse the right pattern: %s \
@@ -91,12 +103,8 @@ let parse file =
                                     right (Common.exn_to_s exn))
                          in
                          { Eq.id; left; op; right; languages }
-                     | x ->
-                         UCommon.pr2_gen x;
-                         error "wrong equivalence fields")
-                 | x ->
-                     UCommon.pr2_gen x;
-                     error "wrong equivalence fields")
+                     | _ -> error "wrong equivalence fields")
+                 | _ -> error "wrong equivalence fields")
       | _ -> error "missing equivalences entry")
   | Result.Error (`Msg s) ->
       failwith

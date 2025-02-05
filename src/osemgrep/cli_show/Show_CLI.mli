@@ -9,6 +9,7 @@
    new 'semgrep show supported-languages'
 *)
 type conf = {
+  common : CLI_common.conf;
   (* mix of --dump-ast/--dump-rule/... *)
   show_kind : show_kind;
   json : bool;
@@ -21,11 +22,21 @@ and show_kind =
   | Deployment
   (* dumpers *)
   | DumpPattern of string * Lang.t
+  | DumpCST of Fpath.t * Lang.t
   | DumpAST of Fpath.t * Lang.t
   | DumpConfig of Rules_config.config_string
   | DumpRuleV2 of Fpath.t
   | DumpEnginePath of bool (* pro = true *)
   | DumpCommandForCore
+  | Debug of debug_settings  (** Open an interactive debugging view. *)
+
+and debug_settings = {
+  output_dir : Fpath.t option;
+      (** Directory to save the output to, if it should persist after program
+        termination *)
+  root : Fpath.t;
+      (** Scanning root for debug. TODO: do exactly what scan does here *)
+}
 [@@deriving show]
 
 (*

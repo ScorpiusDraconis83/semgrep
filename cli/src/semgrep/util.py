@@ -22,6 +22,7 @@ from semgrep.constants import Colors
 from semgrep.constants import FIXTEST_SUFFIX
 from semgrep.constants import YML_SUFFIXES
 from semgrep.constants import YML_TEST_SUFFIXES
+from semgrep.semgrep_interfaces.semgrep_output_v1 import Sha1
 
 
 T = TypeVar("T")
@@ -49,13 +50,68 @@ def is_rules(rules: str) -> bool:
     return rules[:6] == "rules:" or rules[:8] == '{"rules"'
 
 
-def path_has_permissions(path: Path, permissions: int) -> bool:
-    return path.exists() and path.stat().st_mode & permissions == permissions
+def is_truthy(value: Any) -> bool:
+    """
+    Returns True if the value is a truthy value, False otherwise.
+    """
+    val = str(value).lower()
+    return value is not None and val in ["true", "1", "y", "on", "yes"]
+
+
+def path_exists(path: Path, follow_symlinks: bool = True) -> bool:
+    """
+    path.exists(follow_links=False) is only supported with Python >= 12.
+    This provides the same functionality for older versions of Python.
+    Also, it returns False instead of raising exceptions in some situations.
+    """
+    try:
+        if follow_symlinks:
+            return path.exists()
+        else:
+            if path.is_symlink():
+                return True
+            else:
+                return path.exists()
+    except Exception:
+        return False
+
+
+def path_has_permissions(
+    path: Path, permissions: int, follow_symlinks: bool = True
+) -> bool:
+    return (
+        # path.stat(follow_symlinks=follow_symlinks): requires python >= 3.10
+        path_exists(path, follow_symlinks=follow_symlinks)
+        and (path.stat() if follow_symlinks else path.lstat()).st_mode & permissions
+        == permissions
+    )
 
 
 def abort(message: str) -> None:
     click.secho(message, fg="red", err=True)
     sys.exit(2)
+
+
+def has_color() -> bool:
+    """
+    Determine if color should be used in the output.
+
+    NOTE: This method shares logic with the `configure` method in `terminal.py`
+    and is intended to mimic the behavior without relying on internal state.
+    This could be a candidate TODO for refactoring to avoid duplication.
+    """
+    force_color = is_truthy(os.environ.get("SEMGREP_FORCE_COLOR"))
+    # See https://no-color.org/
+    no_color = is_truthy(os.environ.get("NO_COLOR")) or is_truthy(
+        os.environ.get("SEMGREP_FORCE_NO_COLOR")
+    )
+    # If both are force_color and no_color are set, force_color wins
+    if force_color and no_color:
+        return True
+    if no_color:
+        return False
+    # If force_color is set, use it. Otherwise, use color if stdout is a tty.
+    return force_color or sys.stdout.isatty()
 
 
 def with_color(
@@ -82,6 +138,31 @@ def with_color(
         bg=(bgcolor.value if bgcolor is not None else None),
         underline=underline,
         bold=bold,
+    )
+
+
+def with_logo_color(text: str) -> str:
+    """
+    Wrap text with our brand color if color is enabled.
+    Does not rely on internal state.
+    """
+    if has_color():
+        return click.style(text, fg=Colors.green.value)
+    return text
+
+
+def welcome() -> None:
+    """
+    Print a welcome message with the Semgrep logo.
+    """
+    logo = with_logo_color("○○○")
+    click.echo(
+        f"""
+┌──── {logo} ────┐
+│ Semgrep CLI │
+└─────────────┘
+""",
+        err=True,
     )
 
 
@@ -208,7 +289,7 @@ def read_range(fd: TextIOWrapper, start_offset: int, end_offset: int) -> str:
     return fd.read(length)
 
 
-def get_lines(
+def get_lines_from_file(
     path: Path,
     start_line: int,
     end_line: int,
@@ -231,6 +312,34 @@ def get_lines(
         result = list(itertools.islice(fd, start_line, end_line))
 
     return result
+
+
+def get_lines_from_git_blob(
+    blob_sha: Sha1,
+    start_line: int,
+    end_line: int,
+) -> List[str]:
+    """
+    Return lines in the given git blob. Result is cached since calling git
+    multiple times may be expensive and the contents of a blob are stable
+    (addressed by sha), since (among other reasons) the sha is directly related
+    to the content.
+
+    Assumes blob exists.
+    """
+    # Avoid circular import
+    from semgrep.git import git_check_output
+
+    # Start and end line are one-indexed, but the subsequent slice call is
+    # inclusive for start and exclusive for end, so only subtract from start
+    start_line = start_line - 1
+
+    if start_line == -1 and end_line == 0:
+        # Completely empty file
+        return []
+
+    contents = git_check_output(["git", "cat-file", "blob", blob_sha.value])
+    return list(itertools.islice(contents.splitlines(), start_line, end_line))
 
 
 def with_feature_status(*, enabled: bool = False) -> str:

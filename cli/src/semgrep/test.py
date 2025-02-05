@@ -1,14 +1,5 @@
-"""
-For each directory containing YAML rules, run those rules on the file in the same directory with the same name but different extension.
-E.g. eqeq.yaml runs on eqeq.py.
-Validate that the output is annotated in the source file with by looking for a comment like:
-
- ```
- # ruleid:eqeq-is-bad
- ```
- On the preceeding line.
-
- """
+# This file is DEPRECATED! Please modify instead osemgrep test in
+# src/osemgrep/cli_test/Test_subcommand.ml
 import collections
 import difflib
 import functools
@@ -18,6 +9,7 @@ import os
 import shutil
 import sys
 import tempfile
+import traceback
 import uuid
 from itertools import product
 from pathlib import Path
@@ -51,8 +43,6 @@ TODORULEID = "todoruleid"
 RULEID = "ruleid"
 TODOOK = "todook"
 OK = "ok"
-DEEPOK = "deepok"
-DEEPRULEID = "deepruleid"
 
 EXIT_FAILURE = 2
 
@@ -63,6 +53,8 @@ def _remove_ending_comments(rule: str) -> str:
     return rule
 
 
+# Partial support for pro/deep annotations by just skipping them.
+# Use osemgrep test --pro if you actually want to process those annotations.
 def normalize_rule_ids(line: str) -> Set[str]:
     """
     given a line like `     # ruleid:foobar`
@@ -73,7 +65,12 @@ def normalize_rule_ids(line: str) -> Set[str]:
     _, rules_text = line.strip().split(":", 1)
     rules_text = rules_text.strip()
     # strip out "deepok" and "deepruleid" annotations if they are there to get rule name
-    if rules_text.startswith(DEEPOK) or rules_text.startswith(DEEPRULEID):
+    if (
+        rules_text.startswith("deepok")
+        or rules_text.startswith("prook")
+        or rules_text.startswith("deepruleid")
+        or rules_text.startswith("proruleid")
+    ):
         _, rules_text = rules_text.split(":")
     rules = rules_text.strip().split(",")
     # remove comment ends for non-newline comment syntaxes
@@ -297,15 +294,17 @@ def _generate_fixcheck_output_line(
 
 
 def invoke_semgrep_multi(
-    config: Path, targets: List[Path], **kwargs: Any
+    config: Path, scanning_roots: List[Path], **kwargs: Any
 ) -> Tuple[Path, Optional[str], Any]:
     try:
-        output = semgrep.run_scan.run_scan_and_return_json(config, targets, **kwargs)
-    except Exception as error:
+        output = semgrep.run_scan.run_scan_and_return_json(
+            config=config, scanning_roots=scanning_roots, **kwargs
+        )
+    except Exception:
         # We must get the string of the error because the multiprocessing library
         # will fail the marshal the error and hang
         # See: https://bugs.python.org/issue39751
-        return (config, str(error), {})
+        return (config, traceback.format_exc(), {})
     else:
         return (config, None, output)
 
@@ -420,9 +419,11 @@ def get_config_fixtest_filenames(
 def config_contains_fix_key(config: Path) -> bool:
     with open(config) as file:
         yaml = YAML(typ="safe")  # default, if not specfied, is 'rt' (round-trip)
-        rule = yaml.load(file)
-        if rule.get("rules"):
-            return "fix" in rule["rules"][0]
+        rules = yaml.load(file)
+        if rules.get("rules"):
+            return any(
+                ("fix" in rule or "fix-regex" in rule) for rule in rules["rules"]
+            )
         else:
             return False
 
@@ -479,12 +480,17 @@ def generate_test_results(
     # in a test context, we don't want to honor the paths: (include/exclude)
     # directive since the test target file, which must have the same
     # basename than the rule, may not match the paths: of the rule
+    respect_rule_paths = False
+    no_git_ignore = True
+    no_rewrite_rule_ids = True
+    # COUPLING: the arguments are the same as the second semgrep-core
+    # invocation later in this file (except for one)!
     invoke_semgrep_fn = functools.partial(
         invoke_semgrep_multi,
         engine_type=engine_type,
-        no_git_ignore=True,
-        respect_rule_paths=False,
-        no_rewrite_rule_ids=True,
+        no_git_ignore=no_git_ignore,
+        respect_rule_paths=respect_rule_paths,
+        no_rewrite_rule_ids=no_rewrite_rule_ids,
         strict=strict,
         optimizations=optimizations,
     )
@@ -538,24 +544,27 @@ def generate_test_results(
         str(c) for c, _fixtest in config_without_fixtests if config_contains_fix_key(c)
     ]
 
+    # TODO: dead code due to configs_with_fixtests being unused and commented out below!
     # this saves execution time: fix will not be correct, if regular test is not correct
-    passed_test_filenames = [
-        filename
-        for _config_filename, matches, soft_errors in tested
-        for _check_id, filename_and_matches in matches.items()
-        for filename, expected_and_reported_lines in filename_and_matches.items()
-        if expected_and_reported_lines["expected_lines"]
-        == expected_and_reported_lines["reported_lines"]
-        and not soft_errors
-    ]
-    configs_with_fixtests = {
-        config: [
-            (target, fixtest)
-            for target, fixtest in testfiles
-            if os.path.abspath(target) in passed_test_filenames
-        ]
-        for config, testfiles in config_with_fixtests
-    }
+    # passed_test_filenames = [
+    #    filename
+    #    for _config_filename, matches, soft_errors in tested
+    #    for _check_id, filename_and_matches in matches.items()
+    #    for filename, expected_and_reported_lines in filename_and_matches.items()
+    #    if expected_and_reported_lines["expected_lines"]
+    #    == expected_and_reported_lines["reported_lines"]
+    #    and not soft_errors
+    # ]
+
+    # TODO: unused misspelled variable 'configs_with_fixtests'! Enable this code?
+    # configs_with_fixtests = {
+    #    config: [
+    #        (target, fixtest)
+    #        for target, fixtest in testfiles
+    #        if os.path.abspath(target) in passed_test_filenames
+    #    ]
+    #    for config, testfiles in config_with_fixtests
+    # }
 
     temp_copies: Dict[Path, str] = {
         target: create_temporary_copy(target)
@@ -569,14 +578,16 @@ def generate_test_results(
     ]
 
     # This is the invocation of semgrep for testing autofix.
-    #
-    # TODO: should 'engine' be set to 'engine=engine' or always 'engine=EngineType.OSS'?
+    # COUPLING: except for autofix, the arguments are the same as above
     invoke_semgrep_with_autofix_fn = functools.partial(
         invoke_semgrep_multi,
-        no_git_ignore=True,
-        no_rewrite_rule_ids=True,
+        engine_type=engine_type,
+        no_git_ignore=no_git_ignore,
+        respect_rule_paths=respect_rule_paths,
+        no_rewrite_rule_ids=no_rewrite_rule_ids,
         strict=strict,
         optimizations=optimizations,
+        # only option that differs from the earlier call to semgrep-core:
         autofix=True,
     )
 
@@ -600,8 +611,8 @@ def generate_test_results(
         os.remove(tempcopy)
 
     output = {
-        "config_missing_tests": config_missing_tests_output,
-        "config_missing_fixtests": configs_missing_fixtests,
+        "config_missing_tests": sorted(config_missing_tests_output),
+        "config_missing_fixtests": sorted(configs_missing_fixtests),
         "config_with_errors": config_with_errors_output,
         "results": results_output,
         "fixtest_results": fixtest_results_output,
@@ -625,6 +636,7 @@ def generate_test_results(
         print(json.dumps(output, indent=4, separators=(",", ": ")))
         sys.exit(exit_code)
 
+    # else text ouput
     num_tests = 0
     num_tests_passed = 0
     check_output_lines: str = ""
@@ -691,7 +703,7 @@ def generate_test_results(
 
 def test_main(
     *,
-    target: Sequence[str],
+    scanning_roots: Sequence[str],
     config: Optional[Sequence[str]],
     test_ignore_todo: bool,
     strict: bool,
@@ -699,21 +711,21 @@ def test_main(
     optimizations: str,
     engine_type: EngineType,
 ) -> None:
-    if len(target) != 1:
+    if len(scanning_roots) != 1:
         raise Exception("only one target directory allowed for tests")
-    target_path = Path(target[0])
+    scanning_root_path = Path(scanning_roots[0])
 
     if config:
         if len(config) != 1:
             raise Exception("only one config directory allowed for tests")
         config_path = Path(config[0])
     else:
-        if target_path.is_file():
+        if scanning_root_path.is_file():
             raise Exception("--config is required when running a test on single file")
-        config_path = target_path
+        config_path = scanning_root_path
 
     generate_test_results(
-        target=target_path,
+        target=scanning_root_path,
         config=config_path,
         strict=strict,
         json_output=json,

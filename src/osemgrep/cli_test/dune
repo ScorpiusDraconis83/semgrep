@@ -8,16 +8,17 @@
     cmdliner
     commons
 
-    osemgrep_core
-    osemgrep_configuring
-    osemgrep_networking
+    semgrep.engine
+    semgrep.engine.tests
+    semgrep.core_scan
+    semgrep.core_runner
+    semgrep.osemgrep_core
+    semgrep.osemgrep_networking
   )
  (preprocess
    (pps
      ppx_profiling
      ppx_deriving.show
-     ppx_deriving.eq
-     ppx_hash
    )
  )
 )

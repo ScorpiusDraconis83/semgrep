@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2020 r2c
+ * Copyright (C) 2020 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -13,6 +13,7 @@
  * LICENSE for more details.
  *)
 open Common
+open Fpath_.Operators
 open Either_
 module AST = Ast_ruby
 module CST = Tree_sitter_ruby.CST
@@ -100,9 +101,7 @@ let operator (env : env) (x : CST.operator) =
   | `TILDE tok -> (Right Op_UTilde, token2 env tok)
   | `BANG tok -> (Right Op_UBang, token2 env tok)
   (* TODO *)
-  | `BQUOT tok ->
-      UCommon.pr2_gen tok;
-      failwith "Op_BQUOT???"
+  | `BQUOT _tok -> failwith "Op_BQUOT???"
 
 let int_or_float (env : env) (x : CST.int_or_float) =
   match x with
@@ -647,7 +646,7 @@ and pattern_expr_alt (env : env) (x : CST.pattern_expr_alt) =
   match x with
   | `Alt_pat (v1, v2) ->
       let v1 = pattern_expr_basic env v1 in
-      List.fold_right
+      List_.fold_right
         (fun (v1, pat) acc ->
           let _v1 = (* "|" *) token2 env v1 in
           let v2 = pattern_expr_basic env pat in
@@ -840,7 +839,7 @@ and array_pattern_n (env : env) (x : CST.array_pattern_n) : patlist_arg list =
   | `Splat_param_rep_COMMA_pat_expr (v1, v2) ->
       let v1 = splat_parameter env v1 in
       let v2 =
-        List.map
+        List_.map
           (fun (v1, v2) ->
             let _v1 = (* "," *) token2 env v1 in
             let v2 = pattern_expr env v2 in
@@ -989,7 +988,7 @@ and string_array (env : env) ((v1, v2, v3, v4, v5) : CST.string_array) =
     | None -> None
   in
   let v5 = token2 env v5 (* string_end *) in
-  Literal (String (Double (v1, v3 |> List.flatten, v5)))
+  Literal (String (Double (v1, v3 |> List_.flatten, v5)))
 
 and symbol_array (env : env) ((v1, v2, v3, v4, v5) : CST.symbol_array) =
   let v1 = token2 env v1 (* %i( *) in
@@ -1009,7 +1008,7 @@ and symbol_array (env : env) ((v1, v2, v3, v4, v5) : CST.symbol_array) =
     | None -> None
   in
   let v5 = token2 env v5 (* ) *) in
-  Atom (v1, AtomFromString (v1, v3 |> List.flatten, v5))
+  Atom (v1, AtomFromString (v1, v3 |> List_.flatten, v5))
 
 and pattern_literal (env : env) (x : CST.pattern_literal) : expr =
   match x with
@@ -1564,7 +1563,7 @@ and primary (env : env) (x : CST.primary) : AST.expr =
             | Some x -> terminator env x
             | None -> ()
           in
-          let v4 = List.map (in_clause env) v4 in
+          let v4 = List_.map (in_clause env) v4 in
           let v5 =
             match v5 with
             | Some x -> Some (else_ env x)
@@ -1818,7 +1817,7 @@ and command_argument_list (env : env) (x : CST.command_argument_list) :
       let t = Tok.rewrap_str "..." t in
       let v2 = argument env v2 in
       let v3 =
-        List.map
+        List_.map
           (fun (v1, v2) ->
             let _v1 = (* "," *) token2 env v1 in
             let v2 = argument env v2 in
@@ -2329,7 +2328,7 @@ and delimited_symbol (env : env) ((v1, v2, v3) : CST.delimited_symbol) : atom =
   (Tok.fake_tok v1 ":", AtomFromString (v1, res, v3))
 
 and literal_contents (env : env) (xs : CST.literal_contents) : AST.interp list =
-  List.filter_map
+  List_.filter_map
     (fun x ->
       match x with
       | `Str_content tok ->
@@ -2427,8 +2426,8 @@ let program (env : env) ((v1, _v2interpreted) : CST.program) : AST.stmts =
 let parse file =
   let debug = false in
   H.wrap_parser
-    (fun () -> Tree_sitter_ruby.Parse.file file)
-    (fun cst ->
+    (fun () -> Tree_sitter_ruby.Parse.file !!file)
+    (fun cst _extras ->
       let env = { H.file; conv = H.line_col_to_pos file; extra = Program } in
       if debug then Boilerplate.dump_tree cst;
       program env cst)
@@ -2437,8 +2436,10 @@ let parse_pattern string =
   let debug = false in
   H.wrap_parser
     (fun () -> Tree_sitter_ruby.Parse.string string)
-    (fun cst ->
-      let file = "<file>" in
-      let env = { H.file; conv = Hashtbl.create 0; extra = Pattern } in
+    (fun cst _extras ->
+      let file = Fpath.v "<file>" in
+      let env =
+        { H.file; conv = H.line_col_to_pos_pattern string; extra = Pattern }
+      in
       if debug then Boilerplate.dump_tree cst;
       Ss (program env cst))

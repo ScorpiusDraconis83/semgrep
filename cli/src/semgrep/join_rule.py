@@ -230,7 +230,7 @@ def create_config_map(semgrep_config_strings: List[str]) -> Dict[str, Rule]:
     """
     config = {}
     for config_string in semgrep_config_strings:
-        resolved = resolve_config(config_string, get_project_url())
+        resolved, config_errors = resolve_config(config_string, get_project_url())
         # Some code-fu to get single rules
         config.update(
             {config_string: list(Config._validate(resolved)[0].values())[0][0]}
@@ -261,7 +261,7 @@ def rename_metavars_in_place(
 
 
 def create_model_map(
-    semgrep_results: List[Dict[str, Any]]
+    semgrep_results: List[Dict[str, Any]],
 ) -> Dict[str, Type[BaseModel]]:
     """
     Dynamically create 'peewee' model classes directly from Semgrep results.
@@ -374,7 +374,7 @@ def json_to_rule_match(join_rule: Dict[str, Any], match: Dict[str, Any]) -> Rule
         dataflow_trace=cli_match_extra.dataflow_trace,
         engine_kind=cli_match_extra.engine_kind
         if cli_match_extra.engine_kind
-        else out.EngineKind(out.OSS()),
+        else out.EngineOfFinding(out.OSS()),
         is_ignored=False,
     )
     return RuleMatch(
@@ -400,7 +400,9 @@ def json_to_rule_match(join_rule: Dict[str, Any], match: Dict[str, Any]) -> Rule
 
 def run_join_rule(
     join_rule: Dict[str, Any],
-    targets: List[Path],
+    scanning_roots: List[Path],
+    allow_local_builds: bool = False,
+    ptt_enabled: bool = False,
 ) -> Tuple[List[RuleMatch], List[SemgrepError]]:
     """
     Run a 'join' mode rule.
@@ -429,7 +431,7 @@ def run_join_rule(
     These are the conditions which must be satisfied for this rule to report results.
     All conditions must be satisfied.
 
-    See cli/tests/e2e/rules/join_rules/user-input-with-unescaped-extension.yaml
+    See cli/tests/default/e2e/rules/join_rules/user-input-with-unescaped-extension.yaml
     for an example.
     """
     join_contents = join_rule.get("join", {})
@@ -484,13 +486,15 @@ def run_join_rule(
         rule_path.seek(0)
 
         logger.debug(
-            f"Running join mode rule {join_rule.get('id')} on {len(targets)} files."
+            f"Running join mode rule {join_rule.get('id')} on {len(scanning_roots)} files."
         )
         output = semgrep.run_scan.run_scan_and_return_json(
             config=Path(rule_path.name),
-            targets=targets,
+            scanning_roots=scanning_roots,
             no_rewrite_rule_ids=True,
             optimizations="all",
+            allow_local_builds=allow_local_builds,
+            ptt_enabled=ptt_enabled,
         )
 
     assert isinstance(output, dict)  # placate mypy
@@ -518,7 +522,7 @@ def run_join_rule(
             parsed_errors.append(
                 ERROR_MAP[error_dict.get(errortype)].from_dict(error_dict)
             )
-        except KeyError:
+        except (KeyError, TypeError):
             logger.warning(
                 f"Could not reconstitute Semgrep error: {error_dict}.\nSkipping processing of error"
             )
