@@ -61,10 +61,15 @@ val environment_of_program :
 
 val environment_of_any : Lang.t -> Rule_options.t -> AST_generic.any -> tin
 
-(* This is mostly helpful for Generic_vs_generic, because we want to disable
+(* This is mostly helpful for Pattern_vs_code, because we want to disable
    wildcard imports in certain cases (resolved name matching).
 *)
 val wipe_wildcard_imports : (tin -> tout) -> tin -> tout
+
+(* to handle LocalImportAll *)
+val with_additional_wildcard_import :
+  AST_generic.dotted_ident -> (tin -> tout) -> tin -> tout
+
 val add_mv_capture : Metavariable.mvar -> Metavariable.mvalue -> tin -> tin
 
 (* Update the matching list of statements by providing a new matching
@@ -111,6 +116,13 @@ val m_option_ellipsis_ok :
 val m_option_none_can_match_some : 'a matcher -> 'a option matcher
 val m_list : ('a, 'b) general_matcher -> ('a list, 'b list) general_matcher
 val m_list_prefix : 'a matcher -> 'a list matcher
+
+(* checks if a is a subsequence (not sublist or subset) of b.
+ * e.g. a = [1; 3] and b = [1; 2; 3] does not fail,
+ * and a = [1; 2] and b = [2; 1] fails
+ *)
+val m_list_subsequence :
+  ('a, 'b) general_matcher -> ('a list, 'b list) general_matcher
 
 (*
    Usage: m_list_with_dots less_is_ok f is_dots list_a list_b

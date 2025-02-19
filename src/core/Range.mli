@@ -13,6 +13,9 @@ val pp : Format.formatter -> t -> unit
 
 exception NotValidRange of string
 
+val equal : t -> t -> bool
+val compare : t -> t -> int
+
 (* included or equal *)
 val ( $<=$ ) : t -> t -> bool
 
@@ -23,14 +26,14 @@ val ( $<$ ) : t -> t -> bool
 val ( $<>$ ) : t -> t -> bool
 
 (* start_line - end_line -> filename -> range *)
-val range_of_line_spec : string -> string (* filename *) -> t
+val range_of_line_spec : string -> Fpath.t -> t
 
 (* start_line:start_col - end_line:end_col -> filename -> range *)
-val range_of_linecol_spec : string -> string (* filename *) -> t
+val range_of_linecol_spec : string -> Fpath.t -> t
 val range_of_token_locations : Tok.location -> Tok.location -> t
 val range_of_tokens : Tok.t list -> t option
 
 (* Note that the file content is memoized, so multiple calls to
  * content_at_range will not read_file again and again the same file.
  *)
-val content_at_range : string (* filename *) -> t -> string
+val content_at_range : Fpath.t -> t -> string

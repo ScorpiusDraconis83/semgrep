@@ -1,6 +1,6 @@
 (* Nat Mote
  *
- * Copyright (C) 2019-2022 r2c
+ * Copyright (C) 2019-2022 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -12,12 +12,9 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
  * LICENSE for more details.
  *)
-
 open Common
 open AST_generic
 module MV = Metavariable
-
-let ( let/ ) = Result.bind
 
 (*****************************************************************************)
 (* Prelude *)
@@ -44,7 +41,7 @@ let ( let/ ) = Result.bind
 module ASTTable = Hashtbl.Make (struct
   type t = AST_generic.any
 
-  let equal = AST_generic_equals.with_structural_equal AST_generic.equal_any
+  let equal = AST_generic.equal_any
   let hash = AST_generic.hash_any
 end)
 
@@ -68,6 +65,10 @@ module JsTsPrinter = Hybrid_print.Make (struct
   class printer = Ugly_print_AST.jsts_printer
 end)
 
+module OCamlPrinter = Hybrid_print.Make (struct
+  class printer = Ugly_print_AST.ocaml_printer
+end)
+
 let get_printer lang external_printer :
     (Ugly_print_AST.printer_t, string) result =
   match lang with
@@ -78,12 +79,13 @@ let get_printer lang external_printer :
   | Lang.Js
   | Lang.Ts ->
       Ok (new JsTsPrinter.printer external_printer)
+  | Lang.Ocaml -> Ok (new OCamlPrinter.printer external_printer)
   | __else__ -> Error (spf "No printer available for %s" (Lang.to_string lang))
 
 let original_source_of_ast source any =
   let* start, end_ = AST_generic_helpers.range_of_any_opt any in
-  let starti = start.Tok.pos.bytepos in
-  let _, _, endi = Tok.end_pos_of_loc end_ in
+  let starti = start.Loc.pos.bytepos in
+  let _, _, endi = Loc.end_pos end_ in
   let len = endi - starti in
   let str = String.sub source starti len in
   Some str
@@ -136,7 +138,8 @@ let add_metavars (tbl : ast_node_table) metavars =
       | Ss _
       | Params _
       | Xmls _
-      | Text _ ->
+      | Text _
+      | Any _ ->
           ())
     metavars
 

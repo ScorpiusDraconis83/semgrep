@@ -2,7 +2,6 @@ import textwrap
 from contextlib import contextmanager
 from itertools import groupby
 from pathlib import Path
-from shutil import get_terminal_size
 from typing import Any
 from typing import Dict
 from typing import Iterable
@@ -14,46 +13,47 @@ from typing import Sequence
 from typing import Tuple
 
 import click
-import colorama
 from rich.console import Console
+from rich.text import Text
 
+import semgrep.formatter.base as base
 import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semgrep.console import console
 from semgrep.console import Title
 from semgrep.constants import CLI_RULE_ID
 from semgrep.constants import Colors
-from semgrep.constants import ELLIPSIS_STRING
-from semgrep.constants import MAX_CHARS_FLAG_NAME
-from semgrep.constants import MAX_LINES_FLAG_NAME
 from semgrep.error import SemgrepCoreError
 from semgrep.error import SemgrepError
-from semgrep.formatter.base import BaseFormatter
 from semgrep.rule import Rule
 from semgrep.rule_match import RuleMatch
 from semgrep.semgrep_types import LANGUAGE
 from semgrep.semgrep_types import Language
+from semgrep.state import get_state
 from semgrep.util import format_bytes
-from semgrep.util import get_lines
+from semgrep.util import get_lines_from_file
 from semgrep.util import MASK_CHAR
 from semgrep.util import MASK_SHOW_PCT
 from semgrep.util import truncate
 from semgrep.util import unit_str
 from semgrep.util import with_color
+from semgrep.verbose_logging import getLogger
 
-MAX_TEXT_WIDTH = 120
+logger = getLogger(__name__)
 
+RULE_INDENT = 5  # NOTE: There are 2 leading spaces not included in this number
 BASE_INDENT = 8
-
-terminal_size = get_terminal_size((MAX_TEXT_WIDTH, 1))[0]
-if terminal_size <= 0:
-    terminal_size = MAX_TEXT_WIDTH
-width = min(MAX_TEXT_WIDTH, terminal_size)
-if width <= 110:
-    width = width - 5
-else:
-    width = width - (width - 100)
-
-FINDINGS_INDENT_DEPTH = 10
+FINDINGS_INDENT_DEPTH = 14
+BASE_WIDTH = console.width
+# NOTE: All text widths must be > 0 to avoid runtime value errors.
+#       As a preventative measure, we set a minimum width of 10
+#       for all text widths, with the wrapper function `safe_width`.
+MIN_TEXT_WIDTH = 10
+FINDINGS_TEXT_WIDTH = BASE_WIDTH - (FINDINGS_INDENT_DEPTH + 2)
+RULE_TEXT_WIDTH = BASE_WIDTH - (RULE_INDENT + 4)
+DESC_TEXT_WIDTH = BASE_WIDTH - (BASE_INDENT + 4)
+AUTOFIX_TEXT_WIDTH = BASE_WIDTH - (
+    BASE_INDENT + 4 + 13
+)  # 4 for line number, 13 for autofix tag
 
 
 GROUP_TITLES: Dict[Tuple[out.Product, str], str] = {
@@ -66,11 +66,50 @@ GROUP_TITLES: Dict[Tuple[out.Product, str], str] = {
     (out.Product(out.Secrets()), "valid"): "Valid Secrets Finding",
     (out.Product(out.Secrets()), "invalid"): "Invalid Secrets Finding",
     (out.Product(out.Secrets()), "unvalidated"): "Unvalidated Secrets Finding",
+    (out.Product(out.Secrets()), "generic-secrets"): "Generic Secrets Finding",
     (
         out.Product(out.Secrets()),
         "validation error",
     ): "Secrets Validation Error",
 }
+
+SEVERITY_MAP_PLAIN = {
+    out.Critical.to_json(): ("", "❯❯❯❱"),
+    out.Error.to_json(): ("", "❯❯❱"),
+    out.High.to_json(): ("", "❯❯❱"),
+    out.Warning.to_json(): ("", " ❯❱"),
+    out.Medium.to_json(): ("", " ❯❱"),
+    out.Info.to_json(): ("", "  ❱"),
+    out.Low.to_json(): ("", "  ❱"),
+}
+
+SEVERITY_MAP_STYLED = {
+    out.Critical.to_json(): ("magenta", "❯❯❯❱"),
+    out.Error.to_json(): ("red", "❯❯❱"),
+    out.High.to_json(): ("red", "❯❯❱"),
+    out.Warning.to_json(): ("yellow", " ❯❱"),
+    out.Medium.to_json(): ("yellow", " ❯❱"),
+    out.Info.to_json(): ("green", "  ❱"),
+    out.Low.to_json(): ("green", "  ❱"),
+}
+
+
+def safe_width(width: int) -> int:
+    """
+    Return a width that is at least MIN_TEXT_WIDTH to avoid
+    runtime value errors.
+    """
+    return max(MIN_TEXT_WIDTH, width)
+
+
+def to_severity_indicator(
+    rule_match: RuleMatch,
+    color_output: bool = False,
+) -> Tuple[str, str]:
+    """Return a color and severity icon."""
+    severity = rule_match.severity.to_json()
+    lookup = SEVERITY_MAP_STYLED if color_output else SEVERITY_MAP_PLAIN
+    return lookup.get(severity, ("", "   "))
 
 
 def format_finding_line(
@@ -82,7 +121,8 @@ def format_finding_line(
     end_col: int,
     color: bool,
     mask: bool,
-) -> str:
+    per_line_max_chars_limit: int,
+) -> Text:
     """
     Assumes column start and end numbers are 1-indexed
     """
@@ -98,12 +138,19 @@ def format_finding_line(
         mid = line[start:show_until] + (MASK_CHAR * (end - show_until))
     else:
         mid = line[start:end]
-
-    if color:
-        mid = with_color(Colors.foreground, mid, bold=True)
-
-    line = line[:start] + mid + line[end:]
-    return line
+    # adjust for 1-indexed line number and add separator
+    line_number_str = f"{line_number}┆ ".rjust(5)  # 3 digits + 1 separator + 1 space
+    # use a marker to indicate where we have the match for colored replacement
+    mid_styled = mid or "" if not color else f"▶{mid}◀"
+    wrapped_text = textwrap.fill(
+        f"{line_number_str}{line[:start]}{mid_styled}{line[end:]}",
+        width=safe_width(per_line_max_chars_limit),
+        initial_indent=(FINDINGS_INDENT_DEPTH - 6) * " ",
+        subsequent_indent=(FINDINGS_INDENT_DEPTH - 1) * " ",
+    )
+    # manually apply bolding when color is enabled to avoid wrapping issues
+    wrapped_text = wrapped_text.replace("▶", "\033[1m").replace("◀", "\033[0m")
+    return Text.from_ansi(wrapped_text)
 
 
 def format_lines(
@@ -118,15 +165,18 @@ def format_lines(
     per_finding_max_lines_limit: Optional[int],
     per_line_max_chars_limit: Optional[int],
     show_separator: bool,
-    show_path: bool,
-) -> Iterator[str]:
+    is_different_file: bool,
+) -> Iterator[Text]:
     trimmed = 0
-    stripped = False
 
     if per_finding_max_lines_limit:
         trimmed = len(lines) - per_finding_max_lines_limit
         lines = lines[:per_finding_max_lines_limit]
 
+    per_line_max_chars_limit = min(
+        per_line_max_chars_limit or FINDINGS_TEXT_WIDTH,
+        FINDINGS_TEXT_WIDTH,
+    )
     # we remove indentation at the start of the snippet to avoid wasting space
     dedented_lines = textwrap.dedent("".join(lines)).splitlines()
     indent_len = (
@@ -138,62 +188,48 @@ def format_lines(
     # since we dedented each line, we need to adjust where the highlighting is
     start_col -= indent_len
     end_col -= indent_len
-
     for i, line in enumerate(dedented_lines):
         line = line.rstrip()
-        line_number = ""
-        if start_line:
-            line = format_finding_line(
-                line,
-                start_line + i,
-                start_line,
-                start_col,
-                end_line,
-                end_col,
-                color=color_output,
-                mask=mask_match,
+        # Taint findings can span multiple files, so the line number reported by
+        # 'format_finding_line' below may not belong to the same file where the
+        # finding is reported! For the very first line, if 'is_different_file'
+        # is True, we print the file.
+        if i == 0 and is_different_file:
+            yield Text.from_ansi(
+                f" " * (BASE_INDENT + 1)
+                + f"{with_color(Colors.cyan, f'{path}', bold=False)}"
             )
-            line_number = f"{start_line + i}"
-
-            if per_line_max_chars_limit and len(line) > per_line_max_chars_limit:
-                stripped = True
-                is_first_line = i == 0
-                if is_first_line:
-                    line = (
-                        line[start_col - 1 : start_col - 1 + per_line_max_chars_limit]
-                        + ELLIPSIS_STRING
-                    )
-                    if start_col > 1:
-                        line = ELLIPSIS_STRING + line
-                else:
-                    line = line[:per_line_max_chars_limit] + ELLIPSIS_STRING
-                # while stripping a string, the ANSI code for resetting color might also get stripped.
-                line = line + colorama.Style.RESET_ALL
-
-        # plus one because we want this to be slightly separated from the intervening messages
-        if i == 0 and show_path:
-            yield f" " * (
-                BASE_INDENT + 1
-            ) + f"{with_color(Colors.cyan, f'{path}', bold=False)}"
-
-        yield f" " * (
-            11 - len(line_number)
-        ) + f"{line_number}┆ {line}" if line_number else f"{line}"
-
-    if stripped:
-        stripped_str = (
-            f"[shortened a long line from output, adjust with {MAX_CHARS_FLAG_NAME}]"
+        # NOTE: need to consider length of line number when calculating max chars
+        yield format_finding_line(
+            line,
+            start_line + i,
+            start_line,
+            start_col,
+            end_line,
+            end_col,
+            color=color_output,
+            mask=mask_match,
+            per_line_max_chars_limit=per_line_max_chars_limit,
         )
-        yield " " * FINDINGS_INDENT_DEPTH + stripped_str
 
-    if per_finding_max_lines_limit != 1:
-        if trimmed > 0:
-            trimmed_str = (
-                f" [hid {trimmed} additional lines, adjust with {MAX_LINES_FLAG_NAME}] "
-            )
-            yield " " * FINDINGS_INDENT_DEPTH + trimmed_str
-        elif lines and show_separator:
-            yield f" " * FINDINGS_INDENT_DEPTH + f"⋮┆" + f"-" * 40
+    if per_finding_max_lines_limit == 1:
+        return
+
+    if trimmed > 0:
+        yield Text.assemble(
+            " " * (FINDINGS_INDENT_DEPTH - 4),
+            f" [hid {trimmed} additional lines, adjust with --max-lines-per-finding] ",
+        )
+    elif lines and show_separator:
+        longest_line_len = min(
+            per_line_max_chars_limit, max(len(line) for line in lines)
+        )
+        seperator_fill_count = longest_line_len - 1
+        # TODO: re-enable dynamic size in a separate PR to avoid too many test changes
+        seperator_fill_count = 40 if 1 else seperator_fill_count  # dummy if statement
+        yield Text.assemble(
+            f" " * (FINDINGS_INDENT_DEPTH - 4) + f"⋮┆" + f"-" * seperator_fill_count
+        )
 
 
 def finding_to_line(
@@ -202,7 +238,7 @@ def finding_to_line(
     per_finding_max_lines_limit: Optional[int],
     per_line_max_chars_limit: Optional[int],
     show_separator: bool,
-) -> Iterator[str]:
+) -> Iterator[Text]:
     path = rule_match.path
     start_line = rule_match.start.line
     end_line = rule_match.end.line
@@ -233,10 +269,20 @@ def match_to_lines(
     color_output: bool,
     per_finding_max_lines_limit: Optional[int],
     per_line_max_chars_limit: Optional[int],
-) -> Iterator[str]:
+) -> Iterator[Text]:
     path = Path(location.path.value)
-    is_same_file = path == ref_path
-    lines = get_lines(path, location.start.line, location.end.line)
+    # If 'is_different_file' is True, it means that we are going to print a
+    # bunch of lines that belong to a different file, so instruct 'format_lines'
+    # to print the name of that file too.
+    is_different_file = path != ref_path
+    try:
+        lines = get_lines_from_file(path, location.start.line, location.end.line)
+    except FileNotFoundError:
+        # Use ‘content’ instead when the file at the specified location doesn’t exist.
+        # This can happen if the taint trace shows a match in a temporary fake lifecycle
+        # file used for web framework analysis. The issue is specific to pysemgrep, as
+        # for osemgrep, the temporary file isn’t deleted until osemgrep finishes.
+        lines = [content]
     yield from format_lines(
         path,
         location.start.line,
@@ -249,7 +295,7 @@ def match_to_lines(
         per_finding_max_lines_limit,
         per_line_max_chars_limit,
         False,
-        not is_same_file,
+        is_different_file,
     )
 
 
@@ -259,13 +305,13 @@ def call_trace_to_lines(
     color_output: bool,
     per_finding_max_lines_limit: Optional[int],
     per_line_max_chars_limit: Optional[int],
-) -> Iterator[str]:
+) -> Iterator[Text]:
     trace = call_trace.value
     if isinstance(trace, out.CliLoc):
         yield from match_to_lines(
             ref_path,
-            trace.value[0],
-            trace.value[1],
+            trace.value.value[0],
+            trace.value.value[1],
             color_output,
             per_finding_max_lines_limit,
             per_line_max_chars_limit,
@@ -276,8 +322,8 @@ def call_trace_to_lines(
 
         yield from match_to_lines(
             ref_path,
-            data[0],
-            data[1],
+            data.value[0],
+            data.value[1],
             color_output,
             per_finding_max_lines_limit,
             per_line_max_chars_limit,
@@ -286,15 +332,20 @@ def call_trace_to_lines(
         if intermediate_vars and len(intermediate_vars) > 0:
             # TODO change this message based on rule kind if we ever use
             # dataflow traces for more than just taint
-            yield (
+            yield Text.assemble(
                 BASE_INDENT * " " + "Taint flows through these intermediate variables:"
             )
             prev_path = ref_path
             for var in intermediate_vars:
                 loc = var.location
                 path = Path(loc.path.value)
-                lines = get_lines(Path(loc.path.value), loc.start.line, loc.end.line)
-                is_same_file = path == prev_path
+                try:
+                    lines = get_lines_from_file(
+                        Path(loc.path.value), loc.start.line, loc.end.line
+                    )
+                except FileNotFoundError:
+                    lines = [var.content]
+                is_different_file = path != prev_path
                 yield from format_lines(
                     Path(loc.path.value),
                     loc.start.line,
@@ -307,14 +358,14 @@ def call_trace_to_lines(
                     per_finding_max_lines_limit,
                     per_line_max_chars_limit,
                     False,
-                    not is_same_file,
+                    is_different_file,
                 )
                 prev_path = path
 
         if isinstance(call_trace.value, out.CliCall):
-            yield (BASE_INDENT * " " + "then call to:")
+            yield Text.assemble(BASE_INDENT * " " + "then call to:")
         elif isinstance(call_trace.value, out.CliLoc):
-            yield (BASE_INDENT * " " + "then reaches:")
+            yield Text.assemble(BASE_INDENT * " " + "then reaches:")
         yield from call_trace_to_lines(
             ref_path,
             call_trace,
@@ -331,15 +382,15 @@ def dataflow_trace_to_lines(
     per_finding_max_lines_limit: Optional[int],
     per_line_max_chars_limit: Optional[int],
     show_separator: bool,
-) -> Iterator[str]:
+) -> Iterator[Text]:
     if dataflow_trace:
         source = dataflow_trace.taint_source
         intermediate_vars = dataflow_trace.intermediate_vars
         sink = dataflow_trace.taint_sink
 
         if source:
-            yield ""
-            yield (BASE_INDENT * " " + "Taint comes from:")
+            yield Text.assemble("")
+            yield Text.assemble(BASE_INDENT * " " + "Taint comes from:")
             yield from call_trace_to_lines(
                 rule_match_path,
                 source,
@@ -351,16 +402,19 @@ def dataflow_trace_to_lines(
         if intermediate_vars and len(intermediate_vars) > 0:
             # TODO change this message based on rule kind of we ever use
             # dataflow traces for more than just taint
-            yield ""
-            yield (
+            yield Text.assemble("")
+            yield Text.assemble(
                 BASE_INDENT * " " + "Taint flows through these intermediate variables:"
             )
             prev_path = rule_match_path
             for var in intermediate_vars:
                 loc = var.location
                 path = Path(loc.path.value)
-                lines = get_lines(path, loc.start.line, loc.end.line)
-                is_same_file = path == prev_path
+                try:
+                    lines = get_lines_from_file(path, loc.start.line, loc.end.line)
+                except FileNotFoundError:
+                    lines = [var.content]
+                is_different_file = path != prev_path
                 yield from format_lines(
                     path,
                     loc.start.line,
@@ -373,13 +427,15 @@ def dataflow_trace_to_lines(
                     per_finding_max_lines_limit,
                     per_line_max_chars_limit,
                     False,
-                    not is_same_file,
+                    is_different_file,
                 )
                 prev_path = path
 
         if sink:
-            yield ""
-            yield (BASE_INDENT * " " + "This is how taint reaches the sink:")
+            yield Text.assemble("")
+            yield Text.assemble(
+                FINDINGS_INDENT_DEPTH * " " + "This is how taint reaches the sink:"
+            )
             yield from call_trace_to_lines(
                 rule_match_path,
                 sink,
@@ -387,10 +443,13 @@ def dataflow_trace_to_lines(
                 per_finding_max_lines_limit,
                 per_line_max_chars_limit,
             )
-            yield ""
+            yield Text.assemble("")
 
         if source and show_separator:
-            yield f" " * BASE_INDENT + f"⋮┆" + f"-" * 40
+            seperator_fill_count = safe_width(min(40, FINDINGS_TEXT_WIDTH - 1))
+            yield Text.assemble(
+                f" " * (FINDINGS_INDENT_DEPTH - 4) + f"⋮┆" + f"-" * seperator_fill_count
+            )
 
 
 def get_details_shortlink(rule_match: RuleMatch) -> Optional[str]:
@@ -434,7 +493,10 @@ def print_time_summary(
         err for err in error_output if isinstance(err, SemgrepCoreError)
     ]
     errors = {
-        (err.core.location.path.value, err.core.error_type.kind)
+        (
+            err.core.location.path.value if err.core.location else "",
+            err.core.error_type.kind,
+        )
         for err in semgrep_core_errors
     }
 
@@ -570,20 +632,23 @@ def print_text_output(
     # Sort the findings according to RuleMatch.get_ordering_key()
     sorted_rule_matches = sorted(rule_matches)
     for rule_index, rule_match in enumerate(sorted_rule_matches):
-        current_file = rule_match.path
+        current_file = (
+            f"{rule_match.path}@{rule_match.git_commit.value}"
+            if rule_match.git_commit
+            else rule_match.path
+        )
         message = rule_match.message
         fix = rule_match.fix
+        lockfile: Optional[str] = None
         if "sca_info" in rule_match.extra and (rule_match.extra["sca_info"].reachable):
-            lockfile = rule_match.extra["sca_info"].dependency_match.lockfile
-        else:
-            lockfile = None
+            lockfile = rule_match.extra["sca_info"].dependency_match.lockfile.value
         if last_file is None or last_file != current_file:
             if last_file is not None:
                 console.print()
             console.print(
-                f"\n{with_color(Colors.cyan, f'  {current_file} ', bold=False)}"
+                f"\n{with_color(Colors.cyan, f'  {current_file}', bold=False)}"
                 + (
-                    f"with lockfile {with_color(Colors.cyan, f'{lockfile}')}"
+                    f" with lockfile {with_color(Colors.cyan, f'{lockfile}')}"
                     if lockfile
                     else ""
                 )
@@ -601,31 +666,68 @@ def print_text_output(
                 or last_message != message
             )
         ):
-            shortlink = get_details_shortlink(rule_match)
-            shortlink_text = (8 * " " + shortlink + "\n") if shortlink else ""
-            title_text = click.wrap_text(
-                f"{with_color(Colors.foreground, rule_match.title, bold=True)}",
-                width + 10,
-                5 * " ",
-                5 * " ",
-                False,
+            rule_title = (
+                rule_match.title
+            )  # Title of the rule that we need to bold later
+            wrapped_text = textwrap.fill(
+                rule_title,
+                width=safe_width(RULE_TEXT_WIDTH),
+                initial_indent="",
+                subsequent_indent=RULE_INDENT * " ",
             )
+            sev_color, sev_icon = to_severity_indicator(rule_match, color_output)
+            text = Text.assemble(
+                (RULE_INDENT - 4) * " ",
+                (sev_icon, sev_color),
+                " ",
+                (f"{wrapped_text}", "bold"),
+            )
+            if last_file == current_file and last_rule_id != rule_match.rule_id:
+                console.print(
+                    " "
+                )  # add a blank line between different rules in the same file
+
+            console.print(text)
+
             severity = (
                 (
-                    f"{8 * ' '}Severity: {with_color(Colors.foreground, rule_match.metadata['sca-severity'], bold=True)}\n"
+                    f"{BASE_INDENT * ' '}Severity: {with_color(Colors.foreground, rule_match.metadata['sca-severity'], bold=True)}\n"
                 )
                 if "sca_info" in rule_match.extra
                 and "sca-severity" in rule_match.metadata
                 else ""
             )
-            message_text = click.wrap_text(f"{message}", width, 8 * " ", 8 * " ", True)
-            console.print(f"{title_text}\n{severity}{message_text}\n{shortlink_text}")
-
-        autofix_tag = with_color(Colors.green, "         ▶▶┆ Autofix ▶")
-        if fix is not None:
-            console.print(
-                f"{autofix_tag} {fix if fix else with_color(Colors.red, 'delete')}"
+            message_text = click.wrap_text(
+                f"{message}",
+                width=safe_width(DESC_TEXT_WIDTH),
+                initial_indent=BASE_INDENT * " ",
+                subsequent_indent=BASE_INDENT * " ",
+                preserve_paragraphs=True,
             )
+            shortlink = get_details_shortlink(rule_match)
+            shortlink_text = (BASE_INDENT * " " + shortlink + "\n") if shortlink else ""
+            console.print(f"{severity}{message_text}\n{shortlink_text}")
+
+        if fix is not None:
+            autofix_tag = "▶▶┆ Autofix ▶ "  # 13 chars for autofix tag
+            wrapped_fix = (
+                textwrap.fill(
+                    textwrap.dedent(
+                        " ".join(l.strip() for l in fix.splitlines(keepends=True))
+                    ),
+                    width=safe_width(AUTOFIX_TEXT_WIDTH),
+                    initial_indent="",
+                    subsequent_indent=(BASE_INDENT + 4) * " ",  # 4 for line number
+                )
+                if fix
+                else ""  # keep as empty string if fix is empty string
+            )
+            fix_text = Text.assemble(
+                (BASE_INDENT + 1) * " ",
+                (autofix_tag, "green"),
+                wrapped_fix if wrapped_fix else ("delete", "red"),
+            )
+            console.print(fix_text)
         elif (
             "sca_info" in rule_match.extra
             and "sca-fix-versions" in rule_match.metadata
@@ -669,6 +771,14 @@ def print_text_output(
         is_same_file = (
             next_rule_match.path == rule_match.path if next_rule_match else False
         )
+        is_same_rule = (
+            next_rule_match.rule_id == rule_match.rule_id if next_rule_match else False
+        )
+        show_separator = (
+            is_same_file
+            and is_same_rule
+            and not (dataflow_traces and rule_match.dataflow_trace)
+        )
         for line in finding_to_line(
             rule_match,
             color_output,
@@ -677,7 +787,7 @@ def print_text_output(
             # if we have dataflow traces on, then we should print the separator,
             # because otherwise it is easy to mistake taint traces as belonging
             # to a different finding
-            is_same_file and not (dataflow_traces and rule_match.dataflow_trace),
+            show_separator,
         ):
             console.print(line)
 
@@ -690,7 +800,8 @@ def print_text_output(
                 per_line_max_chars_limit,
                 is_same_file,
             ):
-                console.print("  " + line)
+                console.print("  ", end="")
+                console.print(line)
 
 
 @contextmanager
@@ -706,7 +817,7 @@ def force_quiet_off(console: Console) -> Iterator[None]:
         console.quiet = was_quiet
 
 
-class TextFormatter(BaseFormatter):
+class TextFormatter(base.BaseFormatter):
     def format(
         self,
         rules: Iterable[Rule],
@@ -714,7 +825,7 @@ class TextFormatter(BaseFormatter):
         semgrep_structured_errors: Sequence[SemgrepError],
         cli_output_extra: out.CliOutputExtra,
         extra: Mapping[str, Any],
-        is_ci_invocation: bool,
+        ctx: out.FormatContext,
     ) -> str:
         # all output in this function is captured and returned as a string
         with force_quiet_off(console), console.capture() as captured_output:
@@ -729,39 +840,47 @@ class TextFormatter(BaseFormatter):
                 (out.Product(out.SCA()), "unreachable"): [],
                 (out.Product(out.SAST()), "nonblocking"): [],
                 (out.Product(out.Secrets()), "invalid"): [],
+                (out.Product(out.Secrets()), "generic-secrets"): [],
             }
+
+            secrets_blocking_rules = set()
 
             for match in rule_matches:
                 if isinstance(match.product.value, out.SAST):
                     subgroup = "blocking" if match.is_blocking else "nonblocking"
                 elif isinstance(match.product.value, out.Secrets):
-                    state = match.validation_state
-                    if state is None:
-                        subgroup = "unvalidated"
+                    if match.is_blocking:
+                        secrets_blocking_rules.add(match.match.check_id.value)
+                    if match.metadata.get("generic_secrets", False):
+                        subgroup = "generic-secrets"
                     else:
-                        if isinstance(state.value, out.ConfirmedValid):
-                            subgroup = "valid"
-                        elif isinstance(state.value, out.ConfirmedInvalid):
-                            subgroup = "invalid"
-                        elif isinstance(state.value, out.ValidationError):
-                            subgroup = "validation error"
-                        else:
+                        state = match.validation_state
+                        if state is None:
                             subgroup = "unvalidated"
+                        else:
+                            if isinstance(state.value, out.ConfirmedValid):
+                                subgroup = "valid"
+                            elif isinstance(state.value, out.ConfirmedInvalid):
+                                subgroup = "invalid"
+                            elif isinstance(state.value, out.ValidationError):
+                                subgroup = "validation error"
+                            else:
+                                subgroup = "unvalidated"
                 else:
                     subgroup = match.exposure_type or "undetermined"
 
                 grouped_matches[match.product, subgroup].append(match)
 
-            first_party_blocking_rules = {
+            code_blocking_rules = {
                 match.match.check_id.value
                 for match in grouped_matches[out.Product(out.SAST()), "blocking"]
             }
 
             # When ephemeral rules are run with the -e or --pattern flag in the command-line, the rule_id is set to -.
             # The rule is ran in the command-line and has no associated rule_id
-            first_party_blocking_rules.discard("-")
+            code_blocking_rules.discard("-")
 
-            if not is_ci_invocation:
+            if not ctx.is_ci_invocation:
                 grouped_matches[(out.Product(out.SAST()), "merged")] = [
                     *grouped_matches.pop((out.Product(out.SAST()), "nonblocking")),
                     *grouped_matches.pop((out.Product(out.SAST()), "blocking")),
@@ -770,18 +889,43 @@ class TextFormatter(BaseFormatter):
             for group, matches in grouped_matches.items():
                 if not matches:
                     continue
-                console.print(Title(unit_str(len(matches), GROUP_TITLES[group])))
-                print_text_output(
-                    matches,
-                    extra.get("color_output", False),
-                    extra["per_finding_max_lines_limit"],
-                    extra["per_line_max_chars_limit"],
-                    extra["dataflow_traces"],
-                )
 
-            if first_party_blocking_rules and is_ci_invocation:
+                # Generic Secrets findings are somewhat special, and don't print out their
+                # matches in the output.
+                # Instead, they are sent to the App for LLM validation. We expect this to
+                # be noisy, so we won't print out all of the findings here.
+                if group[1] == "generic-secrets" and ctx.is_ci_invocation:
+                    url = get_state().env.semgrep_url
+                    console.print(
+                        textwrap.dedent(
+                            f"""
+                        Your deployment has generic secrets enabled. {len(matches)} potential line locations
+                        will be uploaded to the Semgrep platform and then analyzed by Semgrep Assistant.
+                        Any findings that appear actionable will be available in the Semgrep Platform.
+                        You can view the secrets analyzed by Assistant at {url}/orgs/-/secrets?status=open&type=AI-detected+secret+%28beta%29
+                        """
+                        )
+                    )
+                else:
+                    console.print(Title(unit_str(len(matches), GROUP_TITLES[group])))
+
+                    print_text_output(
+                        matches,
+                        extra.get("color_output", False),
+                        extra["per_finding_max_lines_limit"],
+                        extra["per_line_max_chars_limit"],
+                        extra["dataflow_traces"],
+                    )
+
+            if code_blocking_rules and ctx.is_ci_invocation:
                 console.print(Title("Blocking Code Rules Fired:", order=2))
-                for rule_id in sorted(first_party_blocking_rules):
+                for rule_id in sorted(code_blocking_rules):
+                    console.print(f"  {rule_id}")
+                console.reset_title(order=1)
+
+            if secrets_blocking_rules and ctx.is_ci_invocation:
+                console.print(Title("Blocking Secrets Rules Fired:", order=2))
+                for rule_id in sorted(secrets_blocking_rules):
                     console.print(f"  {rule_id}")
                 console.reset_title(order=1)
 

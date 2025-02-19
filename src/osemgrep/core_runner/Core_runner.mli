@@ -1,3 +1,9 @@
+(* This module is essentially an adapter around Core_scan.scan()
+ * (and Deep_scan.scan()) so that it can be used from osemgrep. We try to
+ * imitate what is done in pysemgrep which calls semgrep-core
+ * (or semgrep-core-proprietary) and its underlying Core_scan (or Deep_scan).
+ *)
+
 (* input *)
 type conf = {
   (* opti and limits *)
@@ -6,63 +12,72 @@ type conf = {
   max_memory_mb : int;
   timeout : float;
   timeout_threshold : int; (* output flags *)
+  (* features *)
   nosem : bool;
   strict : bool;
+  (* useful for debugging rules *)
   time_flag : bool;
   matching_explanations : bool;
   dataflow_traces : bool;
-  (* osemgrep-only: *)
-  ast_caching : bool;
+  (* extra scan-adjacent information
+     only set by the scan config from the app
+  *)
+  symbol_analysis : bool;
 }
 [@@deriving show]
 
 (* output *)
-type result = {
-  core : Semgrep_output_v1_t.core_output;
-  hrules : Rule.hrules;
-  scanned : Fpath.t Set_.t;
+type result = Core_runner_result.t
+
+(* This type is similar to Core_scan.func, but taking a list of
+ * rules and targets and a simpler conf type instead of the very
+ * large Core_scan_config.t
+ *
+ * The list of targets below are final targets (not scanning roots).
+ * no further scanning of the filesystem shall be performed.
+ * The Find_targets.conf argument is for explicit target management.
+ *)
+type func = {
+  run :
+    ?file_match_hook:(Fpath.t -> Core_result.matches_single_file -> unit) ->
+    conf ->
+    Find_targets.conf ->
+    Rule_error.rules_and_invalid ->
+    Fpath.t list ->
+    Core_result.result_or_exn;
 }
 
-(* similar to Core_scan.core_scan_func *)
-type scan_func_for_osemgrep =
-  ?respect_git_ignore:bool ->
-  ?file_match_results_hook:
-    (Fpath.t -> Core_result.matches_single_file -> unit) option ->
-  conf ->
-  (* LATER? use Config_resolve.rules_and_origin instead? *)
-  Rule.rules ->
-  Rule.invalid_rule_error list ->
-  Fpath.t list ->
-  Core_result.result_or_exn
+type pro_conf = {
+  diff_config : Differential_scan_config.t;
+  roots : Scanning_root.t list;
+  engine_type : Engine_type.t;
+}
 
-(* Semgrep Pro hook for osemgrep *)
-val hook_pro_scan_func_for_osemgrep :
-  (Fpath.t list ->
-  ?diff_config:Differential_scan_config.t ->
-  Engine_type.t ->
-  scan_func_for_osemgrep)
-  option
-  ref
+val default_conf : conf
 
-val create_core_result : Rule.rule list -> Core_result.result_or_exn -> result
+(* osemgrep-pro hooks *)
+val hook_mk_pro_core_run_for_osemgrep : (pro_conf -> func) option Hook.t
+val hook_pro_git_remote_scan_setup : (func -> func) option Hook.t
 
-(* Core_scan_func adapter to be used in osemgrep.
+(* sca-scan hook *)
+val hook_adjust_targets :
+  (Fpath.t list -> Target.t list -> Target.t list) Hook.t
+
+(* builder *)
+val mk_result : Rule.rule list -> Core_result.t -> result
+
+(* Core_scan.func adapter to be used in osemgrep.
 
    This will eventually call a core scan like pysemgrep but without
    creating a subprocess.
 
-   The first argument is usually Core_scan.scan_with_exn_handler,
-   but it can also be Run.deep_with_raw_results_and_exn_handler
-   when running in Pro Interfile mode and when called from
-   the Steps_runner in Semgrep Pro.
+   The first argument is usually Core_scan.scan, but it can also be
+   Deep_scan.scan when running in Pro Interfile mode and when called from
+   Steps_scan.scan in Semgrep Pro.
 
    LATER: This function should go away.
 *)
-val mk_scan_func_for_osemgrep :
-  Core_scan.core_scan_func -> scan_func_for_osemgrep
+val mk_core_run_for_osemgrep : Core_scan.func -> func
 
-(* Helper used in Semgrep_scan.ml to setup logging *)
+(* Helper used also in Steps_scan.ml *)
 val core_scan_config_of_conf : conf -> Core_scan_config.t
-
-(* reused in semgrep-server *)
-val split_jobs_by_language : Rule.t list -> Fpath.t list -> Lang_job.t list

@@ -8,6 +8,7 @@ from typing import Optional
 from typing import Set
 from typing import Tuple
 
+import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semdep.external.parsy import string
 from semdep.external.parsy import string_from
 from semdep.external.parsy import success
@@ -22,8 +23,8 @@ from semdep.parsers.util import transitivity
 from semdep.parsers.util import upto
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
 from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
+from semgrep.semgrep_interfaces.semgrep_output_v1 import Fpath
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Pypi
-from semgrep.semgrep_interfaces.semgrep_output_v1 import Requirements
 from semgrep.semgrep_interfaces.semgrep_output_v1 import ScaParserName
 
 
@@ -97,7 +98,7 @@ COMMENT_REGEX = r"(^|\s+)#.*$"
 
 
 def get_manifest_deps(
-    parsed: Optional[List[Tuple[int, Tuple[str, List[Tuple[str, str]]]]]]
+    parsed: Optional[List[Tuple[int, Tuple[str, List[Tuple[str, str]]]]]],
 ) -> Optional[Set[str]]:
     return {package for _, (package, _) in parsed} if parsed else None
 
@@ -109,13 +110,13 @@ def parse_requirements(
         DependencyFileToParse(
             lockfile_path,
             requirements,
-            ScaParserName(Requirements()),
+            ScaParserName(out.PRequirements()),
             preprocessors.CommentRemover(),
         ),
         DependencyFileToParse(
             manifest_path,
             requirements,
-            ScaParserName(Requirements()),
+            ScaParserName(out.PRequirements()),
             preprocessors.CommentRemover(),
         )
         if manifest_path
@@ -142,6 +143,8 @@ def parse_requirements(
                 allowed_hashes={},
                 transitivity=transitivity(manifest_deps, [package]),
                 line_number=line_number,
+                lockfile_path=Fpath(str(lockfile_path)),
+                manifest_path=Fpath(str(manifest_path)) if manifest_path else None,
             )
         )
     return output, errors

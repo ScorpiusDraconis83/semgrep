@@ -1,6 +1,6 @@
 (* Emma Jin
  *
- * Copyright (C) 2021 r2c
+ * Copyright (C) 2021 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -12,7 +12,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
  * LICENSE for more details.
  *)
-
 module Y = Yaml
 module S = Yaml.Stream
 module E = Yaml.Stream.Event
@@ -49,10 +48,10 @@ module G = AST_generic
  *)
 type env = {
   (* when we parse a pattern, the filename is fake ("<pattern_file>") *)
-  file : string; (* filename *)
+  file : Fpath.t;
   (* This is the literal text of the program.
-     We will use this to help us find the proper content of a metavariable matching
-     a "folded" or "literal" style string.
+     We will use this to help us find the proper content of a metavariable
+     matching a "folded" or "literal" style string.
      Essentially, a string using "|" or ">".
   *)
   text : string;
@@ -97,10 +96,10 @@ let _pos_str
     s_index (s_line + 1) s_column e_index (e_line + 1) e_column
 
 let tok (index, line, column) str env =
-  let pos = Pos.make ~file:env.file ~line:(line + 1) ~column index in
+  let pos = Pos.make env.file ~line:(line + 1) ~column index in
   Tok.OriginTok { str; pos }
 
-let mk_tok ?(style = `Plain)
+let mk_tok ?(style : Y.scalar_style = `Plain)
     {
       E.start_mark = { M.index; M.line; M.column };
       E.end_mark = { M.index = e_index; _ };
@@ -124,7 +123,9 @@ let mk_tok ?(style = `Plain)
     | `Double_quoted
     | `Single_quoted ->
         (index, line, column, String.sub env.text index (e_index - index))
-    | __else__ -> (index, line, column, str)
+    | `Plain
+    | `Any ->
+        (index, line, column, str)
   in
   (* their tokens are 0 indexed for line and column, AST_generic's are 1
    * indexed for line, 0 for column *)
@@ -168,9 +169,9 @@ let error str v pos env =
   let t = mk_tok pos (p_token v) env in
   raise (Parsing_error.Other_error (str, t))
 
-let get_res file = function
+let get_res (file : Fpath.t) = function
   | Result.Error (`Msg str) ->
-      let loc = Tok.first_loc_of_file file in
+      let loc = Loc.first_loc_of_file file in
       let tok = Tok.tok_of_loc loc in
       raise (Parsing_error.Other_error (str, tok))
   | Result.Ok v -> v
@@ -182,7 +183,7 @@ let do_parse env =
       let prefix, tok =
         match env.last_event with
         | None ->
-            let loc = Tok.first_loc_of_file env.file in
+            let loc = Loc.first_loc_of_file env.file in
             ("(incorrect error location) ", Tok.tok_of_loc loc)
         | Some (v, pos) ->
             ( "(approximate error location; error nearby after) ",
@@ -210,9 +211,31 @@ let make_alias anchor pos env =
   | Some (expr, _p) -> (G.e (G.Alias ((anchor, t), expr)), pos)
   | None -> raise (UnrecognizedAlias t)
 
+(*
+   A tag is a sort of type annotation e.g. '!number 42' tags the value
+   '42' with the tag 'number'.
+*)
+let apply_optional_tag (tag : string option) (tag_pos : E.pos) (e : G.expr) env
+    : G.expr =
+  match tag with
+  | None -> e
+  | Some tag_str ->
+      let tag_name =
+        if String.starts_with "!" tag_str then
+          (* "!foo" -> "foo", "!$X" -> "$X"
+             Removing the exclamation mark is necessary for the metavariable
+             to be identified during matching. *)
+          String_.safe_sub tag_str 1 (String.length tag_str - 1)
+        else (* invalid but safer than an exception *)
+          tag_str
+      in
+      let tok = mk_tok tag_pos tag_str env in
+      let type_ = G.ty_builtin (tag_name, tok) in
+      Cast (type_, tok, e) |> G.e
+
 (* Scalars must first be checked for sgrep patterns *)
 (* Then, they may need to be converted from a string to a value *)
-let scalar (_tag, pos, value, style) env : G.expr * E.pos =
+let scalar (tag, pos, value, (style : Y.scalar_style)) env : G.expr * E.pos =
   (* If it's a target, then we don't want to parse it like a metavariable,
      or else matching will mess up when it attempts to match a pattern
      metavariable to target YAML code which looks like a metavariable
@@ -223,13 +246,17 @@ let scalar (_tag, pos, value, style) env : G.expr * E.pos =
     | `Double_quoted
     | `Single_quoted ->
         true
-    | __else__ -> false
+    | `Folded
+    | `Literal
+    | `Plain
+    | `Any ->
+        false
   in
-  if AST_generic.is_metavar_name value && (not env.is_target) && not quoted then
-    (G.N (mk_id value pos env) |> G.e, pos)
-  else
-    let token = mk_tok ~style pos value env in
-    let expr =
+  let expr =
+    if AST_generic.is_metavar_name value && (not env.is_target) && not quoted
+    then G.N (mk_id value pos env) |> G.e
+    else
+      let token = mk_tok ~style pos value env in
       (if quoted then G.L (G.String (fb (value, token)))
        else
          match value with
@@ -276,20 +303,27 @@ let scalar (_tag, pos, value, style) env : G.expr * E.pos =
              try G.L (G.Float (Some (float_of_string value), token)) with
              | _ -> G.L (G.String (fb (value, token)))))
       |> G.e
-    in
-    (expr, pos)
+  in
+  let expr = apply_optional_tag tag pos expr env in
+  (expr, pos)
 
 (* Sequences are arrays in the generic AST *)
-let sequence (_tag, start_pos, (es, end_pos)) env =
-  (G.Container (G.Array, mk_bracket (start_pos, end_pos) es env) |> G.e, end_pos)
+let sequence (tag, start_pos, (es, end_pos)) env =
+  let expr =
+    G.Container (G.Array, mk_bracket (start_pos, end_pos) es env) |> G.e
+  in
+  let expr = apply_optional_tag tag start_pos expr env in
+  (expr, end_pos)
 
 (* Mappings are dictionaries in the generic AST *)
-let mappings (_tag, start_pos, (es, end_pos)) env =
-  match es with
-  | [ { G.e = G.Ellipsis e; _ } ] -> (G.Ellipsis e |> G.e, end_pos)
-  | _ ->
-      ( G.Container (G.Dict, mk_bracket (start_pos, end_pos) es env) |> G.e,
-        end_pos )
+let mappings (tag, start_pos, (es, end_pos)) env =
+  let expr =
+    match es with
+    | [ { G.e = G.Ellipsis e; _ } ] -> G.Ellipsis e |> G.e
+    | _ -> G.Container (G.Dict, mk_bracket (start_pos, end_pos) es env) |> G.e
+  in
+  let expr = apply_optional_tag tag start_pos expr env in
+  (expr, end_pos)
 
 let make_mapping (pos1, pos2) ((key, value) : G.expr * G.expr) env =
   match (key.G.e, value.G.e) with
@@ -590,7 +624,7 @@ let mask_unicode str =
 (* Entry points *)
 (*****************************************************************************)
 
-let parse_yaml_file ~is_target file str =
+let parse_yaml_file ~is_target (file : Fpath.t) str =
   (* we do not preprocess the yaml here; ellipsis should be transformed
    * only in the pattern *)
   let bytepos_to_pos =
@@ -614,7 +648,7 @@ let parse_yaml_file ~is_target file str =
 (* The entry points for yaml-language parsing *)
 
 let any str =
-  let file = "<pattern_file>" in
+  let file = Fpath.v "<pattern_file>" in
   let str = preprocess_yaml (mask_unicode str) in
   let parser = get_res file (S.parser str) in
   let env =
@@ -631,6 +665,6 @@ let any str =
   let xs = parse env in
   make_pattern_expr xs
 
-let program file =
-  let str = mask_unicode (UCommon.read_file file) in
+let program (file : Fpath.t) =
+  let str = mask_unicode (UFile.read_file file) in
   parse_yaml_file ~is_target:true file str

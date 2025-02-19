@@ -1,9 +1,8 @@
 val parse_pattern :
-  ?print_errors:bool ->
-  ?rule_options:Rule_options_t.t option ->
+  ?rule_options:Rule_options_t.t ->
   Lang.t ->
   string ->
-  Pattern.t
+  (Pattern.t, string) Result.t
 
 val parse_pattern_ref :
-  (bool -> Rule_options_t.t option -> Lang.t -> string -> Pattern.t) ref
+  (Rule_options_t.t option -> Lang.t -> string -> Pattern.t) ref

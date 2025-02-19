@@ -29,7 +29,7 @@ exception ExceededMemoryLimit of string
    on Linux/x86_64 where we'd get a 'Stack_overflow' exception.
    See:
    - https://discuss.ocaml.org/t/is-there-any-value-in-having-a-maximum-stack-size/8214/10
-   - https://github.com/returntocorp/semgrep/issues/3640
+   - https://github.com/semgrep/semgrep/issues/3640
 
    The limits set by this function call should be lower than the system
    limits so as to get exceptions instead of segfaults.
@@ -67,6 +67,7 @@ exception ExceededMemoryLimit of string
    - default heap_warning_mb: 500 MiB
 *)
 val run_with_memory_limit :
+  < Cap.memory_limit > ->
   ?get_context:(unit -> string) ->
   ?stack_warning_kb:int ->
   ?heap_warning_mb:int ->

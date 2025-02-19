@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2020 r2c
+ * Copyright (C) 2020 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -12,8 +12,11 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
  * LICENSE for more details.
  *)
+open Common
+open Fpath_.Operators
 
-let logger = Logging.get_logger [ __MODULE__ ]
+(* alt: could also use Log_lib_parsing.Log *)
+module Log = Log_tree_sitter.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -26,22 +29,22 @@ let logger = Logging.get_logger [ __MODULE__ ]
 (* Types *)
 (*****************************************************************************)
 type 'a env = {
-  (* TODO: use Fpath.t *)
-  file : string; (* filename *)
-  (* get the charpos (offset) in file given a line x col *)
-  conv : (int * int, int) Hashtbl.t;
+  file : Fpath.t;
+  (* get the charpos (offset) in file given a line x col.
+     Raises Not_found! *)
+  conv : int * int -> int;
   extra : 'a;
 }
 
 (*****************************************************************************)
-(* Helpers *)
+(* API *)
 (*****************************************************************************)
 
-(* mostly a copy-paste of Parse_info.full_charpos_to_pos_large *)
+(* coupling: mostly a copy-paste of Pos.full_charpos_to_pos_large *)
 let line_col_to_pos file =
-  let size = UFile.filesize (Fpath.v file) + 2 in
+  let size = UFile.filesize file + 2 in
   let h = Hashtbl.create size in
-  UCommon.with_open_infile file (fun chan ->
+  UFile.with_open_in file (fun chan ->
       let charpos = ref 0 in
       let line = ref 0 in
 
@@ -49,9 +52,10 @@ let line_col_to_pos file =
         try
           while true do
             let s = input_line chan in
+            (* we are using 1-based lines *)
             incr line;
 
-            (* '... +1 do'  cos input_line dont return the trailing \n *)
+            (* '... +1 do'  cos input_line does not return the trailing \n *)
             for i = 0 to String.length s - 1 + 1 do
               Hashtbl.add h (!line, i) (!charpos + i)
             done;
@@ -59,30 +63,37 @@ let line_col_to_pos file =
           done
         with
         | End_of_file ->
-            (* bugfix: this is wrong:  Hashtbl.add h (!line, 0) !charpos;
-             * because an ident on the last line would get
-             * the last charpos.
-             *)
-            ()
+            (* We need to add this in case there is a trailing \n in the
+               end of the file *)
+            Hashtbl.add h (!line + 1, 0) !charpos
       in
       full_charpos_to_pos_aux ());
-  h
+  Hashtbl.find h
+
+(* Patterns are given as a one line string with '\n' characters (huh?)
+   TODO: Explain the desired behavior *)
+let line_col_to_pos_pattern _str (_line, col) = col
 
 let token env (tok : Tree_sitter_run.Token.t) =
   let loc, str = tok in
-  let h = env.conv in
   let start = loc.Tree_sitter_run.Loc.start in
   (* Parse_info is 1-line based and 0-column based, like Emacs *)
   let line = start.Tree_sitter_run.Loc.row + 1 in
   let column = start.Tree_sitter_run.Loc.column in
-  let bytepos =
-    try Hashtbl.find h (line, column) with
-    | Not_found -> -1
-    (* TODO? more strict? raise exn? *)
-  in
   let file = env.file in
-  let pos = Pos.make ~line ~column ~file bytepos in
-  let tok_loc = { Tok.str; pos } in
+  let bytepos =
+    match env.conv (line, column) with
+    | x -> x
+    | exception Not_found ->
+        raise
+          (Tok.NoTokenLocation
+             (spf
+                "Could not convert (line %d, column %d) into a byte offset in \
+                 file %s. Invalid location for token %S."
+                line column !!file str))
+  in
+  let pos = Pos.make ~line ~column file bytepos in
+  let tok_loc = { Loc.str; pos } in
   Tok.tok_of_loc tok_loc
 
 let str env (tok : Tree_sitter_run.Token.t) =
@@ -91,36 +102,36 @@ let str env (tok : Tree_sitter_run.Token.t) =
 
 let debug_sexp_cst_after_error sexp_cst =
   let s = Printexc.get_backtrace () in
-  UCommon.pr2 "Some constructs are not handled yet";
-  UCommon.pr2 "CST was:";
+  Log.warn (fun m -> m "Some constructs are not handled yet. CST was: ");
   (* bugfix: do not use CST.dump_tree because it prints on stdout
    * and will mess up our interaction with semgrep python wrapper and
    * also for the parsing_stat CI job.
    *
    * alt: Use Print_sexp.to_stderr of martin
    *)
-  UCommon.pr2 (Sexplib.Sexp.to_string_hum sexp_cst);
-  UCommon.pr2 "Original backtrace:";
-  UCommon.pr2 s
+  Log.warn (fun m ->
+      m "%s\nOriginal backtrace:\n %s" (Sexplib.Sexp.to_string_hum sexp_cst) s)
 
 let wrap_parser tree_sitter_parser ast_mapper =
-  let res : 'a Tree_sitter_run.Parsing_result.t = tree_sitter_parser () in
+  let res : ('program, 'extra) Tree_sitter_run.Parsing_result.t =
+    tree_sitter_parser ()
+  in
   let program =
     match res.program with
     | Some cst ->
         (if res.errors <> [] then
            let error_strs =
-             List.map
+             List_.map
                (fun err -> err.Tree_sitter_run.Tree_sitter_error.msg)
                res.errors
            in
            let error_str = String.concat "\n" error_strs in
-           logger#error "Partial errors returned by Tree-sitter parser\n%s"
-             error_str);
-        Some (ast_mapper cst)
+           Log.warn (fun m ->
+               m "Partial errors returned by Tree-sitter parser\n%s" error_str));
+        Some (ast_mapper cst res.extras)
     | None -> None
   in
-  { res with program }
+  { res with program; extras = [] }
 
 (* Stuff to put in entry point at the beginning:
    let todo _env _x = failwith "not implemented"

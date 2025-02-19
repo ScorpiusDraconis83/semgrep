@@ -16,7 +16,8 @@
 (*****************************************************************************)
 (* Prelude *)
 (*****************************************************************************)
-open Alcotest_ext
+
+let t = Testo.create
 
 (*****************************************************************************)
 (* Helpers *)
@@ -39,23 +40,24 @@ let with_mock_normal_responses =
     | "/api/agent/deployments/current" ->
         let status, body_path =
           match Http_mock_client.get_header req "Authorization" with
-          | Some "Bearer ok_token" -> (200, "./tests/login/ok_response.json")
-          | Some "Bearer bad_token" -> (401, "./tests/login/bad_response.json")
+          | Some "Bearer ok_token" ->
+              (200, Fpath.v "./tests/login/ok_response.json")
+          | Some "Bearer bad_token" ->
+              (401, Fpath.v "./tests/login/bad_response.json")
           | _ -> failwith "Unexpected token"
         in
-        let body =
-          body_path |> UCommon.read_file |> Cohttp_lwt.Body.of_string
-        in
+        let body = UFile.read_file body_path |> Cohttp_lwt.Body.of_string in
         Lwt.return Http_mock_client.(basic_response ~status body)
     | "/api/agent/tokens/requests" ->
         let%lwt () =
           Http_mock_client.check_body body
-            Http_mock_client.(
-              body_of_file ~trim:true "./tests/login/fetch_body.json")
+            (Http_mock_client.body_of_file ~trim:true
+               (Fpath.v "./tests/login/fetch_body.json"))
         in
         Lwt.return
           (Http_mock_client.basic_response ~status:200
-             Http_mock_client.(body_of_file "./tests/login/token_response.json"))
+             (Http_mock_client.body_of_file
+                (Fpath.v "./tests/login/token_response.json")))
     | _ -> failwith ("Unexpected path: " ^ Uri.path uri)
   in
   Http_mock_client.with_testing_client make_fn
@@ -71,37 +73,28 @@ let with_mock_four_o_four_responses =
   Http_mock_client.with_testing_client make_fn
 
 let with_mock_envvars f () =
-  Common2.with_tmp_file ~str:fake_settings ~ext:"yml" (fun tmp_settings_file ->
+  UTmp.with_temp_file ~contents:fake_settings ~suffix:".yml"
+    (fun tmp_settings_file ->
       let new_settings =
-        {
-          !Semgrep_envvars.v with
-          user_settings_file = Fpath.v tmp_settings_file;
-        }
+        { !Semgrep_envvars.v with user_settings_file = tmp_settings_file }
       in
       Common.save_excursion Semgrep_envvars.v new_settings f)
 
 let with_mock_envvars_and_normal_responses f =
   with_mock_normal_responses (with_mock_envvars f)
 
-let with_logged_in f =
-  let token = ok_token in
-  let caps = Cap.network_caps_UNSAFE () in
-  let caps = Auth.cap_token_and_network token caps in
-  match Semgrep_login.save_token caps with
-  | Ok _deployment_config -> f ()
-  | Error e -> failwith e
-
 (*****************************************************************************)
 (* Tests *)
 (*****************************************************************************)
 
 let save_token_tests caps =
-  ignore with_logged_in;
   let valid_token_test () =
     let caps = Auth.cap_token_and_network ok_token caps in
     match Semgrep_login.save_token caps with
     | Ok _deployment_config ->
-        Alcotest.(check bool) "logged in" true (Semgrep_login.is_logged_in ())
+        Alcotest.(check bool)
+          "logged in" true
+          (Semgrep_login.is_logged_in_weak ())
     | Error e -> failwith e
   in
   let invalid_token_test () =
@@ -111,13 +104,13 @@ let save_token_tests caps =
     | Error _ ->
         Alcotest.(check bool)
           "not logged in" false
-          (Semgrep_login.is_logged_in ())
+          (Semgrep_login.is_logged_in_weak ())
   in
   let tests =
     [ ("invalid token", invalid_token_test); ("valid token", valid_token_test) ]
-    |> List_.map (fun (n, f) -> (n, with_mock_envvars_and_normal_responses f))
+    |> List_.map (fun (n, f) -> t n (with_mock_envvars_and_normal_responses f))
   in
-  pack_tests "save_token" tests
+  Testo.categorize "save_token" tests
 
 let fetch_token_tests caps =
   let fetch_basic () =
@@ -150,12 +143,13 @@ let fetch_token_tests caps =
         Alcotest.(check int) "retry count" 12 !retry_count
     | _ -> failwith "Expected timeout"
   in
-  pack_tests "fetch_token"
+  Testo.categorize "fetch_token"
     [
-      ("basic", with_mock_envvars_and_normal_responses fetch_basic);
-      ( "no internet",
-        with_mock_envvars (with_mock_four_o_four_responses fetch_no_internet) );
+      t "basic" (with_mock_envvars_and_normal_responses fetch_basic);
+      t "no internet"
+        (with_mock_envvars (with_mock_four_o_four_responses fetch_no_internet));
     ]
 
 let tests caps =
-  pack_suites "Osemgrep Login" [ save_token_tests caps; fetch_token_tests caps ]
+  Testo.categorize_suites "Osemgrep Login"
+    [ save_token_tests caps; fetch_token_tests caps ]

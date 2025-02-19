@@ -1,8 +1,0 @@
-(library
-  (name spacegrep_tests)
-  (libraries
-     spacegrep
-     alcotest
-     alcotest_ext
-  )
-)

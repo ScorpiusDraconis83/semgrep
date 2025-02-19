@@ -887,7 +887,8 @@ and for_header = (
 )
 
 and formal_parameter = [
-    `Requ_param of (
+    `Semg_ellips of Token.t (* "..." *)
+  | `Requ_param of (
         parameter_name
       * type_annotation option
       * initializer_ option
@@ -2003,3 +2004,7 @@ type jsx_start_opening_element (* inlined *) = (
   * anon_choice_jsx_attr_name_b052322
   * jsx_attribute_ list (* zero or more *)
 )
+
+type extra = [ `Comment of Loc.t * comment ]
+
+type extras = extra list

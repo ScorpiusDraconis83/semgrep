@@ -1154,7 +1154,7 @@ parameter_decl:
      { let (t_ret, p_specs) = type_and_specs_from_decl $1 in
        let ii = Tok.unsafe_fake_tok "" in
        let (name, ftyp) = fixNameForParam ii $2 in
-       P (make_param (ftyp t_ret) ~p_name:(Some name) ~p_specs) }
+       P (make_param (ftyp t_ret) ~p_name:name ~p_specs) }
  | decl_spec_seq abstract_declarator
      { let (t_ret, p_specs) = type_and_specs_from_decl $1 in
        P (make_param ($2 t_ret) ~p_specs ) }
@@ -1167,13 +1167,13 @@ parameter_decl:
  | decl_spec_seq declarator "=" assign_expr
      { let (t_ret, p_specs) = type_and_specs_from_decl $1 in
        let (name, ftyp) = fixNameForParam $3 $2 in
-       P (make_param (ftyp t_ret) ~p_name:(Some name) ~p_specs ~p_val:(Some ($3, $4))) }
+       P (make_param (ftyp t_ret) ~p_name:name ~p_specs ~p_val:($3, $4)) }
  | decl_spec_seq abstract_declarator "=" assign_expr
      { let (t_ret, p_specs) = type_and_specs_from_decl $1 in
-       P (make_param ($2 t_ret) ~p_specs ~p_val:(Some ($3, $4))) }
+       P (make_param ($2 t_ret) ~p_specs ~p_val:($3, $4)) }
  | decl_spec_seq "=" assign_expr
      { let (t_ret, p_specs) = type_and_specs_from_decl $1 in
-       P (make_param t_ret ~p_specs ~p_val:(Some($2,$3)) ) }
+       P (make_param t_ret ~p_specs ~p_val:($2,$3) ) }
  (* sgrep-ext: allowed only in last position in C, or in exn in C++ *)
  | "..." { ParamEllipsis $1 }
 
@@ -1453,7 +1453,7 @@ member_declarator:
 enum_specifier:
  | enum_head "{" listc(enumerator) ","? "}"
      { EnumDef ({enum_kind = fst $1; enum_name = snd $1;
-                enum_body = ($2, $3, $5)}) (*$4*) }
+                enum_body = ($2, List.flatten $3, $5)}) (*$4*) }
  (* c++0x: *)
  | enum_head "{" "}"
      { EnumDef ({enum_kind = fst $1; enum_name = snd $1;
@@ -1464,8 +1464,8 @@ enum_head:
      { $1, $2 |> Option.map name_of_id }
 
 enumerator:
- | ident                { { e_name = $1; e_val = None; } }
- | ident "=" const_expr { { e_name = $1; e_val = Some ($2, $3); } }
+ | ident                { [ X { e_name = $1; e_val = None; } ] }
+ | ident "=" const_expr { [ X { e_name = $1; e_val = Some ($2, $3); } ] }
 
 (*-----------------------------------------------------------------------*)
 (* c++ext: constructor special case *)
@@ -1541,17 +1541,14 @@ storage_class_spec:
  (* c++ext: now really used, not as in C, for type inferred variables *)
  | Tauto        { Sto (Auto,    $1) }
  | Tregister    { Sto (Register,$1) }
- (* for thread_local see below *)
+ (* c++11 *)
+ | Tthread_local { Sto (ThreadLocal, $1) }
 
 type_qualifier:
  (* c++ext: also considered a storage class specifier in the spec *)
  | Tmutable     { TQ (Mutable, $1) }
  (* c++?: *)
  | Tconstexpr   { TQ (Constexpr, $1) }
- (* c++11: considered a storafe_class, but can be combined with Extern/Static
-  * so simpler to put as a specifier.
-  *)
- | Tthread_local { TQ (Constexpr, $1) (*TODOAST*) }
 
 (*-----------------------------------------------------------------------*)
 (* declarators (right part of type and variable) *)
@@ -1617,7 +1614,7 @@ initialize2:
 
 (* they can be nested, can have a .x.[3].y *)
 designator:
- | TDot ident   { DesignatorField ($1, $2) }
+ | TDot ident   { DesignatorField (Some $1, $2) }
 (* conflict with kenccext
  | "[" const_expr "]"     %prec LOW_PRIORITY_RULE
      { DesignatorIndex ($1, $2, $3) }

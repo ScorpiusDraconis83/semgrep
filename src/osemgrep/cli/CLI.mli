@@ -1,3 +1,19 @@
+(* no exit, no argv
+ * TODO: Cap.files_argv, Cap.domain, Cap.thread
+ *)
+type caps =
+  < Cap.stdout
+  ; Cap.network
+  ; Cap.exec
+  ; Cap.random
+  ; Cap.signal
+  ; Cap.tmp
+  ; Cap.readdir
+  ; Cap.chdir
+  ; Cap.fork
+  ; Cap.time_limit
+  ; Cap.memory_limit >
+
 (*
    Parse the semgrep command line, run the requested subcommand, and return
    an exit status.
@@ -9,4 +25,13 @@
    Exceptions are caught and turned into an appropriate exit code
    (unless you used --debug).
 *)
-val main : Cap.all_caps -> string array -> Exit_code.t
+val main : caps -> string array -> Exit_code.t
+
+(* osemgrep-pro hooks *)
+val hook_semgrep_interactive :
+  (< Cap.readdir > -> string array -> Exit_code.t) Hook.t
+
+val hook_semgrep_publish :
+  (< Cap.stdout ; Cap.network > -> string array -> Exit_code.t) Hook.t
+
+val hook_semgrep_show : (caps -> string array -> Exit_code.t) Hook.t

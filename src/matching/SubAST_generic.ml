@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2019-2022 r2c
+ * Copyright (C) 2019-2022 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -13,6 +13,7 @@
  * LICENSE for more details.
  *)
 open AST_generic
+module Log = Log_matching.Log
 module H = AST_generic_helpers
 
 (*****************************************************************************)
@@ -33,6 +34,14 @@ let subexprs_of_any_list xs =
   |> List.fold_left
        (fun x -> function
          | E e -> e :: x
+         | _ -> x)
+       []
+
+let substmts_of_any_list xs =
+  xs
+  |> List.fold_left
+       (fun x -> function
+         | S s -> s :: x
          | _ -> x)
        []
 
@@ -61,24 +70,25 @@ let subexprs_of_stmt_kind = function
   (* n *)
   | For (_, MultiForEach es, _) ->
       es
-      |> List_.map_filter (function
+      |> List_.filter_map (function
            | FE (_, _, e) -> Some [ e ]
            | FECond ((_, _, e1), _, e2) -> Some [ e1; e2 ]
            | FEllipsis _ -> None)
-      |> List.concat
+      |> List_.flatten
   | For (_, ForClassic (xs, eopt1, eopt2), _) ->
       (xs
-      |> List_.map_filter (function
+      |> List_.filter_map (function
            | ForInitExpr e -> Some e
            | ForInitVar (_, vdef) -> vdef.vinit))
       @ Option.to_list eopt1 @ Option.to_list eopt2
   | Assert (_, (_, args, _), _) ->
       args
-      |> List_.map_filter (function
+      |> List_.filter_map (function
            | Arg e -> Some e
            | _ -> None)
   | OtherStmt (_op, xs) -> subexprs_of_any_list xs
   | OtherStmtWithStmt (_, xs, _) -> subexprs_of_any_list xs
+  | RawStmt x -> Raw_tree.anys x |> subexprs_of_any_list
   (* 0 *)
   | DirectiveStmt _
   | Block _
@@ -97,7 +107,7 @@ let subexprs_of_stmt st = subexprs_of_stmt_kind st.s
 
 let subexprs_of_args args =
   args |> Tok.unbracket
-  |> List_.map_filter (function
+  |> List_.filter_map (function
        | Arg e
        | ArgKwd (_, e)
        | ArgKwdOptional (_, e) ->
@@ -114,7 +124,7 @@ let subexprs_of_expr with_symbolic_propagation e =
       [ e1 ]
   | L _
   | N _
-  | IdSpecial _
+  | Special _
   | Ellipsis _
   | TypedMetavar _ ->
       []
@@ -123,6 +133,8 @@ let subexprs_of_expr with_symbolic_propagation e =
   | Cast (_, _, e)
   | Ref (_, e)
   | DeRef (_, e)
+  | Alias (_, e)
+  | LocalImportAll (_, _, e)
   | DeepEllipsis (_, e, _)
   | DotAccessEllipsis (e, _) ->
       [ e ]
@@ -157,17 +169,16 @@ let subexprs_of_expr with_symbolic_propagation e =
       (* in theory we should go deeper in any *)
       subexprs_of_any_list anys
   | RawExpr x -> Raw_tree.anys x |> subexprs_of_any_list
-  | Alias (_, e1) -> [ e1 ]
   | Lambda def -> subexprs_of_stmt (H.funcbody_to_stmt def.fbody)
   | Xml { xml_attrs; xml_body; _ } ->
-      List_.map_filter
+      List_.filter_map
         (function
           | XmlAttr (_, _, e)
           | XmlAttrExpr (_, e, _) ->
               Some e
           | _ -> None)
         xml_attrs
-      @ List_.map_filter
+      @ List_.filter_map
           (function
             | XmlExpr (_, Some e, _) -> Some e
             | XmlXml xml -> Some (Xml xml |> AST_generic.e)
@@ -194,7 +205,8 @@ let subexprs_of_expr ?(symbolic_propagation = false) e =
  * but not necessarily any expressions like 'bar() || foo();'.
  * See tests/ts/deep_exprtmt.ts for more examples.
  *)
-let subexprs_of_expr_implicit with_symbolic_propagation e =
+let subexprs_of_expr_implicit (with_symbolic_propagation : bool) (e : expr) :
+    expr list =
   match e.e with
   | N (Id (_, { id_svalue = { contents = Some (Sym e1) }; _ }))
     when with_symbolic_propagation ->
@@ -238,7 +250,7 @@ let subexprs_of_expr_implicit with_symbolic_propagation e =
   (* cases where we should not extract a subexpr *)
   | L _
   | N _
-  | IdSpecial _
+  | Special _
   | Ellipsis _ ->
       []
   | Ref (_, _e)
@@ -253,6 +265,7 @@ let subexprs_of_expr_implicit with_symbolic_propagation e =
   | OtherExpr (_, _anys) -> []
   | RawExpr _ -> []
   | Alias (_, _e1) -> []
+  | LocalImportAll (_, _, _e1) -> []
   | Xml _xmlbody -> []
   | Constructor _ -> []
   | RegexpTemplate _ -> []
@@ -263,6 +276,7 @@ let subexprs_of_expr_implicit with_symbolic_propagation e =
   | DeepEllipsis _
   | DotAccessEllipsis _
   | DisjExpr _ ->
+      Log.err (fun m -> m "%s: impossible AST: %s" __FUNCTION__ (show_expr e));
       raise Common.Impossible
 [@@profiling]
 
@@ -332,6 +346,7 @@ let substmts_of_stmt st =
         | FuncDef def -> [ H.funcbody_to_stmt def.fbody ]
         | ClassDef def ->
             def.cbody |> Tok.unbracket |> List_.map (function F st -> st))
+  | RawStmt x -> Raw_tree.anys x |> substmts_of_any_list
 
 (*****************************************************************************)
 (* Visitors  *)
@@ -373,7 +388,7 @@ let lambdas_in_expr_memo a =
 
 let flatten_substmts_of_stmts xs =
   (* opti: using a ref, List.iter, and Common.push instead of a mix of
-   * List.map, List.flatten and @ below speed things up
+   * List.map, List_.flatten and @ below speed things up
    * (but it is still slow when called many many times)
    *)
   let res = ref [] in

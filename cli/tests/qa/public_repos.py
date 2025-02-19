@@ -23,7 +23,8 @@ class Repo(NamedTuple):
 
 
 REPOS = [
-    Repo("https://github.com/apache/airflow"),
+    # FIXME: Syntax errors in typescript. I made a linear task.
+    # Repo("https://github.com/apache/airflow"),
     Repo("https://github.com/coinbase/bifrost"),
     Repo("https://github.com/coinbase/bip38"),
     Repo("https://github.com/coinbase/btcexport"),
@@ -67,7 +68,6 @@ REPOS = [
     Repo("https://github.com/dropbox/dropbox-sdk-python"),
     Repo("https://github.com/dropbox/dropbox_hook"),
     Repo("https://github.com/dropbox/emmer"),
-    Repo("https://github.com/dropbox/firebase-dropbox-oauth"),
     Repo("https://github.com/dropbox/git-rbr"),
     Repo("https://github.com/dropbox/PyHive"),
     Repo("https://github.com/dropbox/goebpf"),

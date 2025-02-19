@@ -72,7 +72,7 @@ let rec take n xs =
 let exclude p xs = List.filter (fun x -> not (p x)) xs
 let last_n n l = List.rev (take n (List.rev l))
 
-(*let last l = Common.hd_exn "unexpected empty list" (last_n 1 l) *)
+(*let last l = List_.hd_exn "unexpected empty list" (last_n 1 l) *)
 let rec list_last = function
   | [] -> raise Not_found
   | [ x ] -> x
@@ -80,7 +80,7 @@ let rec list_last = function
 
 let (list_of_string : string -> char list) = function
   | "" -> []
-  | s -> List_.enum 0 (String.length s - 1) |> List.map (String.get s)
+  | s -> List_.enum 0 (String.length s - 1) |> List_.map (String.get s)
 
 let (lines : string -> string list) =
  fun s ->
@@ -209,10 +209,14 @@ let pr2_gen x = pr2 (Dumper.dump x)
 
 (* ---------------------------------------------------------------------- *)
 let xxx_once f s =
-  if !UCommon.disable_pr2_once then UCommon.pr2 s
-  else if not (Hashtbl.mem UCommon._already_printed s) then (
-    Hashtbl.add UCommon._already_printed s true;
-    f ("(ONCE) " ^ s))
+  match () with
+  | _ when !UCommon.disable_pr2_once ->
+      (* nosemgrep: no-pr2 *)
+      UCommon.pr2 s
+  | _ when not (Hashtbl.mem UCommon._already_printed s) ->
+      Hashtbl.add UCommon._already_printed s true;
+      f ("(ONCE) " ^ s)
+  | _else_ -> ()
 
 let pr2_once s = xxx_once pr2 s
 
@@ -497,10 +501,10 @@ let test_exn x s =
 (*---------------------------------------------------------------------------*)
 type 'a gen = unit -> 'a
 
-let (ig : int gen) = fun () -> Random.int 10
+let (ig : int gen) = fun () -> URandom.int 10
 
 let (lg : 'a gen -> 'a list gen) =
- fun gen () -> foldn (fun acc _i -> gen () :: acc) [] (Random.int 10)
+ fun gen () -> foldn (fun acc _i -> gen () :: acc) [] (URandom.int 10)
 
 let (pg : 'a gen -> 'b gen -> ('a * 'b) gen) =
  fun gen1 gen2 () -> (gen1 (), gen2 ())
@@ -509,25 +513,25 @@ let polyg = ig
 let (ng : string gen) = fun () -> "a" ^ string_of_int (ig ())
 
 let (oneofl : 'a list -> 'a gen) =
- fun xs () -> List.nth xs (Random.int (List.length xs))
+ fun xs () -> List.nth xs (URandom.int (List.length xs))
 (* let oneofl l = oneof (List.map always l) *)
 
 let (oneof : 'a gen list -> 'a gen) =
- fun xs -> List.nth xs (Random.int (List.length xs))
+ fun xs -> List.nth xs (URandom.int (List.length xs))
 
 let (always : 'a -> 'a gen) = fun e () -> e
 
 let (frequency : (int * 'a gen) list -> 'a gen) =
  fun xs ->
-  let sums = sum_int (List.map fst xs) in
-  let i = Random.int sums in
+  let sums = sum_int (List_.map fst xs) in
+  let i = URandom.int sums in
   let rec freq_aux acc = function
     | (x, g) :: xs -> if i < acc + x then g else freq_aux (acc + x) xs
     | _ -> failwith "frequency"
   in
   freq_aux 0 xs
 
-let frequencyl l = frequency (List.map (fun (i, e) -> (i, always e)) l)
+let frequencyl l = frequency (List_.map (fun (i, e) -> (i, always e)) l)
 
 (*
 let b = oneof [always true; always false] ()
@@ -591,8 +595,8 @@ let rec (statistic_number : 'a list -> (int * 'a) list) = function
 let (statistic : 'a list -> (int * 'a) list) =
  fun xs ->
   let stat_num = statistic_number xs in
-  let totals = sum_int (List.map fst stat_num) in
-  List.map (fun (i, v) -> (i * 100 / totals, v)) stat_num
+  let totals = sum_int (List_.map fst stat_num) in
+  List_.map (fun (i, v) -> (i * 100 / totals, v)) stat_num
 
 let (laws2 :
       string -> ('a -> bool * 'b) -> 'a gen -> 'a option * (int * 'b) list) =
@@ -604,7 +608,7 @@ let (laws2 :
         (n, func n) :: acc)
       [] 1000
   in
-  let stat = statistic (List.map (fun (_x, (_b, v)) -> v) res) in
+  let stat = statistic (List_.map (fun (_x, (_b, v)) -> v) res) in
   let res = List.filter (fun (_x, (b, _v)) -> not b) res in
   if res =*= [] then (None, stat)
   else (Some (fst (List_.hd_exn "unexpected empty list" res)), stat)
@@ -620,36 +624,13 @@ let b = laws "funs" (fun (f,g,h) -> x <= y ==> (max x y  = y)       )(pg ig ig)
  *)
 
 (*
-let one_of xs = List.nth xs (Random.int (List.length xs))
+let one_of xs = List.nth xs (URandom.int (List.length xs))
 let take_one xs =
   if empty xs then failwith "Take_one: empty list"
   else
-    let i = Random.int (List.length xs) in
+    let i = URandom.int (List.length xs) in
     List.nth xs i, filter_index (fun j _ -> i <> j) xs
 *)
-
-(*****************************************************************************)
-(* Persistence *)
-(*****************************************************************************)
-
-let get_value filename =
-  let chan = UStdlib.open_in_bin filename in
-  let x = UStdlib.input_value chan in
-  (* <=> Marshal.from_channel  *)
-  close_in chan;
-  x
-
-let write_value valu filename =
-  let chan = UStdlib.open_out_bin filename in
-  UStdlib.output_value chan valu;
-  (* <=> Marshal.to_channel *)
-  (* Marshal.to_channel chan valu [Marshal.Closures]; *)
-  close_out chan
-
-let write_back func filename = write_value (func (get_value filename)) filename
-let read_value f = get_value f
-let marshal__to_string v flags = Marshal.to_string v flags
-let marshal__from_string v flags = UMarshal.from_string v flags
 
 (*****************************************************************************)
 (* Counter *)
@@ -683,11 +664,11 @@ type timestamp = int
 (* int, bool, char, float, ref ?, string *)
 
 let string_of_string s = "\"" ^ s "\""
-let string_of_list f xs = "[" ^ (xs |> List.map f |> String.concat ";") ^ "]"
+let string_of_list f xs = "[" ^ (xs |> List_.map f |> String.concat ";") ^ "]"
 let string_of_unit () = "()"
 
 let string_of_array f xs =
-  "[|" ^ (xs |> Array.to_list |> List.map f |> String.concat ";") ^ "|]"
+  "[|" ^ (xs |> Array.to_list |> List_.map f |> String.concat ";") ^ "|]"
 
 let string_of_option f = function
   | None -> "None "
@@ -773,7 +754,7 @@ let mk_str_func_of_assoc_conv xs =
   let swap (x, y) = (y, x) in
 
   ( (fun s ->
-      let xs' = List.map swap xs in
+      let xs' = List_.map swap xs in
       List.assoc s xs'),
     fun a -> List.assoc a xs )
 
@@ -1074,7 +1055,7 @@ let is_upper = cbetween 'A' 'Z'
 let is_lower = cbetween 'a' 'z'
 let is_alpha c = is_upper c || is_lower c
 let is_digit = cbetween '0' '9'
-let string_of_chars cs = cs |> List.map (String.make 1) |> String.concat ""
+let string_of_chars cs = cs |> List_.map (String.make 1) |> String.concat ""
 
 (*****************************************************************************)
 (* Num *)
@@ -1206,10 +1187,6 @@ let int64_of_string_c_octal_opt s =
     let s = Common.matched1 s in
     int64_of_string_opt ("0o" ^ s)
   else int64_of_string_opt s
-
-let int_of_string_opt s =
-  try Some (int_of_string s) with
-  | Failure _ -> None
 
 let int_of_string_c_octal_opt s =
   let open Common in
@@ -1546,7 +1523,7 @@ let str_regexp_of_regexp x = Str.regexp (regexp_string_of_regexp x)
 
 let compile_regexp_union xs =
   xs
-  |> List.map (fun x -> regexp_string_of_regexp x)
+  |> List_.map (fun x -> regexp_string_of_regexp x)
   |> join "\\|" |> Str.regexp
 
 (*****************************************************************************)
@@ -1772,20 +1749,6 @@ let normalize_path (file : string) : string =
   let xs' = aux [] xs in
   (if is_rel then "" else "/") ^ join "/" xs'
 
-(*
-let relative_to_absolute s =
-  if Filename.is_relative s
-  then
-    begin
-      let old = USys.getcwd () in
-      Sys.chdir s;
-      let current = USys.getcwd () in
-      Sys.chdir old;
-      s
-    end
-  else s
-*)
-
 let relative_to_absolute s =
   if s = "." then USys.getcwd ()
   else if Filename.is_relative s then USys.getcwd () ^ "/" ^ s
@@ -1808,17 +1771,18 @@ let grep_dash_v_str =
   "| grep -v /.hg/ |grep -v /CVS/ | grep -v /.git/ |grep -v /_darcs/"
   ^ "| grep -v /.svn/ | grep -v .git_annot | grep -v .marshall"
 
-let arg_symlink () = if !UCommon.follow_symlinks then " -L " else ""
+let arg_symlink () = if !UFile.follow_symlinks then " -L " else ""
 
 let files_of_dir_or_files_no_vcs ext xs =
   xs
   |> List_.map (fun x ->
          if USys.is_directory x then
+           (* nosemgrep: forbid-exec *)
            UCmd.cmd_to_list
              ("find " ^ arg_symlink () ^ x ^ " -noleaf -type f -name \"*." ^ ext
             ^ "\"" ^ grep_dash_v_str)
          else [ x ])
-  |> List.concat
+  |> List_.flatten
 
 (*****************************************************************************)
 (* i18n *)
@@ -1938,34 +1902,35 @@ let week_day_info =
 
 let i_to_month_h =
   month_info
-  |> List.map (fun (i, month, _monthstr, _mlong, _days) -> (i, month))
+  |> List_.map (fun (i, month, _monthstr, _mlong, _days) -> (i, month))
 
 let s_to_month_h =
   month_info
-  |> List.map (fun (_i, month, monthstr, _mlong, _days) -> (monthstr, month))
+  |> List_.map (fun (_i, month, monthstr, _mlong, _days) -> (monthstr, month))
 
 let slong_to_month_h =
   month_info
-  |> List.map (fun (_i, month, _monthstr, mlong, _days) -> (mlong, month))
+  |> List_.map (fun (_i, month, _monthstr, mlong, _days) -> (mlong, month))
 
 let month_to_s_h =
   month_info
-  |> List.map (fun (_i, month, monthstr, _mlong, _days) -> (month, monthstr))
+  |> List_.map (fun (_i, month, monthstr, _mlong, _days) -> (month, monthstr))
 
 let month_to_i_h =
   month_info
-  |> List.map (fun (i, month, _monthstr, _mlong, _days) -> (month, i))
+  |> List_.map (fun (i, month, _monthstr, _mlong, _days) -> (month, i))
 
 let i_to_wday_h =
-  week_day_info |> List.map (fun (i, day, _dayen, _dayfr, _daylong) -> (i, day))
+  week_day_info
+  |> List_.map (fun (i, day, _dayen, _dayfr, _daylong) -> (i, day))
 
 let wday_to_en_h =
   week_day_info
-  |> List.map (fun (_i, day, dayen, _dayfr, _daylong) -> (day, dayen))
+  |> List_.map (fun (_i, day, dayen, _dayfr, _daylong) -> (day, dayen))
 
 let wday_to_fr_h =
   week_day_info
-  |> List.map (fun (_i, day, _dayen, dayfr, _daylong) -> (day, dayfr))
+  |> List_.map (fun (_i, day, _dayen, dayfr, _daylong) -> (day, dayfr))
 
 let month_of_string s = List.assoc s s_to_month_h
 let month_of_string_long s = List.assoc s slong_to_month_h
@@ -2075,7 +2040,7 @@ let days_in_week_of_day day =
   let end_d = mday + (6 - wday) in
 
   List_.enum start_d end_d
-  |> List.map (fun mday -> Unix.mktime { tm with Unix.tm_mday = mday } |> fst)
+  |> List_.map (fun mday -> Unix.mktime { tm with Unix.tm_mday = mday } |> fst)
 
 let first_day_in_week_of_day day =
   List_.hd_exn "unexpected empty list" (days_in_week_of_day day)
@@ -2314,7 +2279,7 @@ let n_space n = repeat " " n |> join ""
 
 let indent_string n s =
   let xs = lines s in
-  xs |> List.map (fun s -> n_space n ^ s) |> unlines
+  xs |> List_.map (fun s -> n_space n ^ s) |> unlines
 
 (* see nblines_eff for a more efficient implementation *)
 let nblines s = lines s |> List.length
@@ -2380,12 +2345,12 @@ let nblines_eff2 file =
 
 (* could be in h_files-format *)
 let words_of_string_with_newlines s =
-  lines s |> List.map words |> List.flatten |> exclude String_.empty
+  lines s |> List_.map words |> List_.flatten |> exclude String_.empty
 
 let lines_with_nl_either s =
   let xs = Str.full_split (Str.regexp "\n") s in
   xs
-  |> List.map (function
+  |> List_.map (function
        | Str.Delim _s -> Either.Right ()
        | Str.Text s -> Either.Left s)
 
@@ -2431,7 +2396,7 @@ let cat file =
 *)
 
 let cat_excerpts file lines =
-  UCommon.with_open_infile file (fun chan ->
+  UFile.Legacy.with_open_infile file (fun chan ->
       let lines = List.sort compare lines in
       let rec aux acc lines count =
         let b, l =
@@ -2462,6 +2427,7 @@ let nblines_with_wc a = nblines_eff a
 
 let unix_diff file1 file2 =
   let cmd = (Cmd.Name "diff", [ "-u"; file1; file2 ]) in
+  (* nosemgrep: forbid-exec *)
   match UCmd.lines_of_run ~trim:true cmd with
   | Ok (xs, _status) -> xs
   | Error (`Msg s) -> failwith (spf "unix_diff problem: %s" s)
@@ -2544,8 +2510,8 @@ let capsule_unix f args =
         (Printf.sprintf "exn Unix_error: %s %s %s\n" (Unix.error_message e) fm
            argm)
 
-let (readdir_to_kind_list : string -> Unix.file_kind -> string list) =
- fun path kind ->
+(*
+let readdir_to_kind_list (path : string) (kind : Unix.file_kind) : string list =
   USys.readdir path |> Array.to_list
   |> List.filter (fun s ->
          try
@@ -2568,9 +2534,10 @@ let (readdir_to_link_list : string -> string list) =
 let (readdir_to_dir_size_list : string -> (string * int) list) =
  fun path ->
   USys.readdir path |> Array.to_list
-  |> List_.map_filter (fun s ->
+  |> List_.filter_map (fun s ->
          let stat = UUnix.lstat (path ^ "/" ^ s) in
          if stat.st_kind =*= Unix.S_DIR then Some (s, stat.st_size) else None)
+*)
 
 let unixname () =
   let uid = UUnix.getuid () in
@@ -2589,7 +2556,11 @@ let glob pattern =
   Str.search_forward dir_regex pattern 0 |> ignore;
   let dir = Str.matched_string pattern in
   let regex = pattern |> Re.Glob.glob ~anchored:true |> Re.compile in
-  let files = UCommon.dir_contents dir in
+  (* TODO: should remove, but that would require modifying many call sites
+   * so let's forge one for now
+   *)
+  let caps = Cap.readdir_UNSAFE () in
+  let files = UFile.Legacy.dir_contents caps dir in
   files |> List.filter (fun s -> Re.execp regex s)
 
 let sanity_check_files_and_adjust ext files =
@@ -2599,7 +2570,7 @@ let sanity_check_files_and_adjust ext files =
            if not (file =~ ".*\\." ^ ext) then (
              pr2 ("warning: seems not a ." ^ ext ^ " file");
              false)
-           else if UFile.is_directory (Fpath.v file) then (
+           else if UFile.is_dir ~follow_symlinks:true (Fpath.v file) then (
              pr2 (spf "warning: %s is a directory" file);
              false)
            else true)
@@ -2647,21 +2618,8 @@ let (with_open_outfile_append :
       res)
     (fun _e -> close_out chan)
 
-let tmp_file_cleanup_hooks = ref []
-
-let with_tmp_file ~(str : string) ~(ext : string) (f : string -> 'a) : 'a =
-  let tmpfile = UCommon.new_temp_file "tmp" ("." ^ ext) in
-  UCommon.write_file ~file:tmpfile str;
-  Common.finalize
-    (fun () -> f tmpfile)
-    (fun () ->
-      !tmp_file_cleanup_hooks |> List.iter (fun f -> f tmpfile);
-      UCommon.erase_this_temp_file tmpfile)
-
-let register_tmp_file_cleanup_hook f = Stack_.push f tmp_file_cleanup_hooks
-
 let uncat xs file =
-  UCommon.with_open_outfile file (fun (pr, _chan) ->
+  UFile.Legacy.with_open_outfile file (fun (pr, _chan) ->
       xs
       |> List.iter (fun s ->
              pr s;
@@ -2715,7 +2673,7 @@ let rec zip_safe xs ys =
   | x :: xs, y :: ys -> (x, y) :: zip_safe xs ys
 
 let unzip zs =
-  List.fold_right (fun e (xs, ys) -> (fst e :: xs, snd e :: ys)) zs ([], [])
+  List_.fold_right (fun e (xs, ys) -> (fst e :: xs, snd e :: ys)) zs ([], [])
 
 (* Same as Common2.unzip or List.split but with triples. Tail-recursive. *)
 let unzip3 l =
@@ -2733,7 +2691,7 @@ let unzip4 l =
   in
   unzip [] [] [] [] l
 
-let map_withkeep f xs = xs |> List.map (fun x -> (f x, x))
+let map_withkeep f xs = xs |> List_.map (fun x -> (f x, x))
 
 (* now in prelude
  * let rec take n xs =
@@ -2811,7 +2769,7 @@ let rec group_by_mapped_key fkey l =
 
 let group_and_count xs =
   xs |> groupBy ( =*= )
-  |> List.map (fun xs ->
+  |> List_.map (fun xs ->
          match xs with
          | x :: _rest -> (x, List.length xs)
          | [] -> raise Common.Impossible)
@@ -2852,7 +2810,7 @@ let (group_by_pre : ('a -> bool) -> 'a list -> 'a list * ('a * 'a list) list) =
   let xs' = List.rev xs in
   let ys, unclassified = group_by_post f xs' in
   ( List.rev unclassified,
-    ys |> List.rev |> List.map (fun (xs, x) -> (x, List.rev xs)) )
+    ys |> List.rev |> List_.map (fun (xs, x) -> (x, List.rev xs)) )
 
 let _ =
   assert (
@@ -2932,7 +2890,7 @@ let index_list_and_total xs =
   if List_.null xs then [] (* enum 0 (-1) generate an exception *)
   else
     zip xs (List_.enum 0 (List.length xs - 1))
-    |> List.map (fun (a, b) -> (a, b, total))
+    |> List_.map (fun (a, b) -> (a, b, total))
 
 let avg_list xs =
   let sum = sum_int xs in
@@ -2959,7 +2917,7 @@ let _ = assert_equal (head_middle_tail [ 1; 3 ]) (1, [], 3)
  *)
 
 (* let (++) = (@), could do that, but if load many times the common, then pb *)
-(* let (++) l1 l2 = List.fold_right (fun x acc -> x::acc) l1 l2 *)
+(* let (++) l1 l2 = List_.fold_right (fun x acc -> x::acc) l1 l2 *)
 
 let remove x xs =
   let newxs = List.filter (fun y -> y <> x) xs in
@@ -3000,7 +2958,7 @@ let rec list_init = function
 (* pixel *)
 (* now in prelude
  *   let last_n n l = List.rev (take n (List.rev l))
- *   let last l = Common.hd_exn "unexpected empty list" (last_n 1 l)
+ *   let last l = List_.hd_exn "unexpected empty list" (last_n 1 l)
  *)
 
 (* todo: foldl, foldr (a more consistent foldr) *)
@@ -3047,7 +3005,7 @@ let do_withenv doit f env l =
  * let fold_left_with_index f acc = ...
  *)
 
-let map_withenv f env e = do_withenv List.map f env e
+let map_withenv f env e = do_withenv List_.map f env e
 
 let rec collect_accu f accu = function
   | [] -> accu
@@ -3097,7 +3055,7 @@ let rec removelast = function
 
 let rec inits = function
   | [] -> [ [] ]
-  | e :: l -> [] :: List.map (fun l -> e :: l) (inits l)
+  | e :: l -> [] :: List_.map (fun l -> e :: l) (inits l)
 
 let rec tails = function
   | [] -> [ [] ]
@@ -3157,7 +3115,7 @@ let rec all_assoc e = function
   | _ :: l -> all_assoc e l
 
 let prepare_want_all_assoc l =
-  List.map (fun n -> (n, uniq (all_assoc n l))) (uniq (List.map fst l))
+  List_.map (fun n -> (n, uniq (all_assoc n l))) (uniq (List_.map fst l))
 
 let rotate list =
   List_.tl_exn "unexpected empty list" list
@@ -3287,7 +3245,7 @@ let iter_with_before_after f xs =
 (* kind of cartesian product of x*x  *)
 let rec (get_pair : 'a list -> ('a * 'a) list) = function
   | [] -> []
-  | x :: xs -> List.map (fun y -> (x, y)) xs @ get_pair xs
+  | x :: xs -> List_.map (fun y -> (x, y)) xs @ get_pair xs
 
 (* retourne le rang dans une liste d'un element *)
 let rang elem liste =
@@ -3305,7 +3263,7 @@ let rec doublon = function
 let rec (insert_in : 'a -> 'a list -> 'a list list) =
  fun x -> function
   | [] -> [ [ x ] ]
-  | y :: ys -> (x :: y :: ys) :: List.map (fun xs -> y :: xs) (insert_in x ys)
+  | y :: ys -> (x :: y :: ys) :: List_.map (fun xs -> y :: xs) (insert_in x ys)
 (* insert_in 3 [1;2] = [[3; 1; 2]; [1; 3; 2]; [1; 2; 3]] *)
 
 let rec (permutation : 'a list -> 'a list list) = function
@@ -3330,7 +3288,7 @@ let rec insert_elem_pos (e, pos) xs =
 
 let uncons_permut xs =
   let indexed = index_list xs in
-  indexed |> List.map (fun (x, pos) -> ((x, pos), remove_elem_pos pos xs))
+  indexed |> List_.map (fun (x, pos) -> ((x, pos), remove_elem_pos pos xs))
 
 let _ =
   assert (
@@ -3344,7 +3302,7 @@ let _ =
 let uncons_permut_lazy xs =
   let indexed = index_list xs in
   indexed
-  |> List.map (fun (x, pos) -> ((x, pos), lazy (remove_elem_pos pos xs)))
+  |> List_.map (fun (x, pos) -> ((x, pos), lazy (remove_elem_pos pos xs)))
 
 (* pixel *)
 let map_flatten f l =
@@ -3416,7 +3374,7 @@ let rec sorted_keep_best f = function
 
 let (cartesian_product : 'a list -> 'b list -> ('a * 'b) list) =
  fun xs ys ->
-  xs |> List.map (fun x -> ys |> List.map (fun y -> (x, y))) |> List.flatten
+  xs |> List_.map (fun x -> ys |> List_.map (fun y -> (x, y))) |> List_.flatten
 
 let _ =
   assert_equal
@@ -3481,7 +3439,7 @@ let rec realCombinaison = function
   | a :: l ->
       let res = realCombinaison l in
       let res2 =
-        List.map
+        List_.map
           (function
             | x -> a :: x)
           res
@@ -3495,7 +3453,7 @@ let rec combinaison = function
   | [ _a ] -> []
   | [ a; b ] -> [ (a, b) ]
   | a :: b :: l ->
-      List.map
+      List_.map
         (function
           | elem -> (a, elem))
         (b :: l)
@@ -3578,17 +3536,17 @@ let nb_columns_matrix m =
   Array.length m.(0)
 
 let (rows_of_matrix : 'a matrix -> 'a list list) =
- fun m -> Array.to_list m |> List.map Array.to_list
+ fun m -> Array.to_list m |> List_.map Array.to_list
 
 let (columns_of_matrix : 'a matrix -> 'a list list) =
  fun m ->
   let nbcols = nb_columns_matrix m in
   let nbrows = nb_rows_matrix m in
   List_.enum 0 (nbcols - 1)
-  |> List.map (fun j ->
-         List_.enum 0 (nbrows - 1) |> List.map (fun i -> m.(i).(j)))
+  |> List_.map (fun j ->
+         List_.enum 0 (nbrows - 1) |> List_.map (fun i -> m.(i).(j)))
 
-let all_elems_matrix_by_row m = rows_of_matrix m |> List.flatten
+let all_elems_matrix_by_row m = rows_of_matrix m |> List_.flatten
 let ex_matrix1 = [| [| 0; 1; 2 |]; [| 3; 4; 5 |]; [| 6; 7; 8 |] |]
 let ex_rows1 = [ [ 0; 1; 2 ]; [ 3; 4; 5 ]; [ 6; 7; 8 ] ]
 let ex_columns1 = [ [ 0; 3; 6 ]; [ 1; 4; 7 ]; [ 2; 5; 8 ] ]
@@ -3641,7 +3599,7 @@ let (exists_set : ('a -> bool) -> 'a set -> bool) = List.exists
 let (forall_set : ('a -> bool) -> 'a set -> bool) = List.for_all
 let (filter_set : ('a -> bool) -> 'a set -> 'a set) = List.filter
 let (fold_set : ('a -> 'b -> 'a) -> 'a -> 'b set -> 'a) = List.fold_left
-let (map_set : ('a -> 'b) -> 'a set -> 'b set) = List.map
+let (map_set : ('a -> 'b) -> 'a set -> 'b set) = List_.map
 let (member_set : 'a -> 'a set -> bool) = List.mem
 let find_set = List.find
 let sort_set = List.sort
@@ -3793,10 +3751,10 @@ let (assoc_to_function : ('a, 'b) assoc -> 'a -> 'b) =
 let (empty_assoc : ('a, 'b) assoc) = []
 let fold_assoc = List.fold_left
 let insert_assoc x xs = x :: xs
-let map_assoc = List.map
+let map_assoc = List_.map
 let filter_assoc = List.filter
 let assoc = List.assoc
-let keys xs = List.map fst xs
+let keys xs = List_.map fst xs
 let lookup = assoc
 
 (* assert unique key ?*)
@@ -3813,12 +3771,12 @@ let big_union_assoc f xs = xs |> map_assoc f |> fold_assoc union_set empty_set
    => assoc_map is strange too => equal dont work
 *)
 let (assoc_reverse : ('a * 'b) list -> ('b * 'a) list) =
- fun l -> List.map (fun (x, y) -> (y, x)) l
+ fun l -> List_.map (fun (x, y) -> (y, x)) l
 
 let (assoc_map : ('a * 'b) list -> ('a * 'b) list -> ('a * 'a) list) =
  fun l1 l2 ->
   let l1bis, l2bis = (assoc_reverse l1, assoc_reverse l2) in
-  List.map (fun (x, y) -> (y, List.assoc x l2bis)) l1bis
+  List_.map (fun (x, y) -> (y, List.assoc x l2bis)) l1bis
 
 let rec (lookup_list : 'a -> ('a, 'b) assoc list -> 'b) =
  fun el -> function
@@ -3957,10 +3915,10 @@ let hash_hashset_add k e h =
       Hashtbl.replace hset e true
 
 let hashset_to_set baseset h =
-  h |> hash_to_list |> List.map fst |> fun xs -> baseset#fromlist xs
+  h |> hash_to_list |> List_.map fst |> fun xs -> baseset#fromlist xs
 
-let hashset_to_list h = hash_to_list h |> List.map fst
-let hashset_of_list xs = xs |> List.map (fun x -> (x, true)) |> hash_of_list
+let hashset_to_list h = hash_to_list h |> List_.map fst
+let hashset_of_list xs = xs |> List_.map (fun x -> (x, true)) |> hash_of_list
 
 let hashset_union h1 h2 =
   h2 |> Hashtbl.iter (fun k _bool -> Hashtbl.replace h1 k true)
@@ -3981,10 +3939,10 @@ let group_assoc_bykey_eff xs =
   let h = Hashtbl.create 101 in
   xs |> List.iter (fun (k, v) -> Hashtbl_.push h k v);
   let keys = hkeys h in
-  keys |> List.map (fun k -> (k, Hashtbl_.get_stack h k))
+  keys |> List_.map (fun k -> (k, Hashtbl_.get_stack h k))
 
 let _test_group_assoc () =
-  let xs = List_.enum 0 10000 |> List.map (fun i -> (i_to_s i, i)) in
+  let xs = List_.enum 0 10000 |> List_.map (fun i -> (i_to_s i, i)) in
   let xs = ("0", 2) :: xs in
   (*    let _ys = xs +> Common.groupBy (fun (a,resa) (b,resb) -> a = b)  *)
   let ys = xs |> group_assoc_bykey_eff in
@@ -4129,7 +4087,7 @@ type ('a, 'b) tree = Node of 'a * ('a, 'b) tree list | Leaf of 'b
 let rec map_tree ~fnode ~fleaf tree =
   match tree with
   | Leaf x -> Leaf (fleaf x)
-  | Node (x, xs) -> Node (fnode x, xs |> List.map (map_tree ~fnode ~fleaf))
+  | Node (x, xs) -> Node (fnode x, xs |> List_.map (map_tree ~fnode ~fleaf))
 
 (*****************************************************************************)
 (* N-ary tree with updatable childrens *)
@@ -4281,11 +4239,11 @@ let (del_arc : 'a * 'a -> 'a graph -> 'a graph) =
 
 let (successors : 'a -> 'a graph -> 'a set) =
  fun x (_nodes, arcs) ->
-  arcs |> List.filter (fun (src, _dst) -> src =*= x) |> List.map snd
+  arcs |> List.filter (fun (src, _dst) -> src =*= x) |> List_.map snd
 
 let (predecessors : 'a -> 'a graph -> 'a set) =
  fun x (_nodes, arcs) ->
-  arcs |> List.filter (fun (_src, dst) -> dst =*= x) |> List.map fst
+  arcs |> List.filter (fun (_src, dst) -> dst =*= x) |> List_.map fst
 
 let (nodes : 'a graph -> 'a set) = fun (nodes, _arcs) -> nodes
 
@@ -4409,7 +4367,7 @@ let (display_dot2: 'a graph -> 'a graph -> ('a -> string) -> unit) =
 (*****************************************************************************)
 (* overloading *)
 
-let map = List.map (* note: really really slow, use rev_map if possible *)
+let map = List_.map (* note: really really slow, use rev_map if possible *)
 let filter = List.filter
 let fold = List.fold_left
 let member = List.mem
@@ -4585,8 +4543,8 @@ let regression_testing_vs newscore bestscore =
   let newbestscore = empty_score () in
 
   let allres =
-    hash_to_list newscore |> List.map fst
-    $+$ (hash_to_list bestscore |> List.map fst)
+    hash_to_list newscore |> List_.map fst
+    $+$ (hash_to_list bestscore |> List_.map fst)
   in
   allres
   |> List.iter (fun res ->
@@ -4620,6 +4578,20 @@ let regression_testing_vs newscore bestscore =
   flush UStdlib.stdout;
   flush UStdlib.stderr;
   newbestscore
+
+let get_value filename =
+  let chan = UStdlib.open_in_bin filename in
+  let x = UStdlib.input_value chan in
+  (* <=> Marshal.from_channel  *)
+  close_in chan;
+  x
+
+let write_value valu filename =
+  let chan = UStdlib.open_out_bin filename in
+  UStdlib.output_value chan valu;
+  (* <=> Marshal.to_channel *)
+  (* Marshal.to_channel chan valu [Marshal.Closures]; *)
+  close_out chan
 
 let regression_testing newscore best_score_file =
   pr2 ("regression file: " ^ best_score_file);
@@ -4800,7 +4772,7 @@ let unserial x =
 (* Random *)
 (*****************************************************************************)
 
-let _init_random = Random.self_init ()
+(* let _init_random = Random.self_init () *)
 
 (*
 let random_insert i l =
@@ -4813,7 +4785,7 @@ let rec randomize_list = function
   []  -> []
   | a::l -> random_insert a (randomize_list l)
 *)
-let random_list xs = List.nth xs (Random.int (length xs))
+let random_list xs = List.nth xs (URandom.int (length xs))
 
 (* todo_opti: use fisher/yates algorithm.
  * ref: http://en.wikipedia.org/wiki/Knuth_shuffle
@@ -4843,13 +4815,13 @@ let random_subset_of_list num xs =
   let h = Hashtbl.create 101 in
   let cnt = ref num in
   while !cnt > 0 do
-    let x = Random.int len in
+    let x = URandom.int len in
     if not (Hashtbl.mem h array.(x)) (* bugfix2: not just x :) *) then (
       Hashtbl.add h array.(x) true;
       (* bugfix1: not just x :) *)
       decr cnt)
   done;
-  let objs = hash_to_list h |> List.map fst in
+  let objs = hash_to_list h |> List_.map fst in
   objs
 
 (*x: common.ml *)
@@ -4872,9 +4844,6 @@ let cmdline_flags_devel () =
     ( "-debugger",
       Arg.Set Common.debugger,
       " option to set if launched inside ocamldebug" );
-    ( "-keep_tmp_files",
-      Arg.Set UCommon.save_tmp_files,
-      " keep temporary generated files" );
   ]
 
 let cmdline_flags_verbose () =
@@ -4889,7 +4858,6 @@ let cmdline_flags_other () =
   [
     ("-nocheck_stack", Arg.Clear _check_stack, " ");
     ("-batch_mode", Arg.Set _batch_mode, " no interactivity");
-    ("-keep_tmp_files", Arg.Set UCommon.save_tmp_files, " ");
   ]
 
 (* potentially other common options but not yet integrated:
@@ -4947,10 +4915,11 @@ module Infix = struct
   let ( ==~ ) = ( ==~ )
 end
 
-let with_pr2_to_string f =
-  let file = UCommon.new_temp_file "pr2" "out" in
-  redirect_stdout_stderr file f;
-  cat file
+let with_pr2_to_string caps f =
+  CapTmp.with_temp_file caps ~suffix:".out" (fun path ->
+      let file = Fpath.to_string path in
+      redirect_stdout_stderr file f;
+      cat file)
 
 (*---------------------------------------------------------------------------*)
 (* Directories part 2 *)
@@ -4958,17 +4927,17 @@ let with_pr2_to_string f =
 
 (* todo? vs common_prefix_of_files_or_dirs? *)
 let find_common_root files =
-  let dirs_part = files |> List.map fst in
+  let dirs_part = files |> List_.map fst in
 
   let rec aux current_candidate xs =
     try
       let topsubdirs =
-        xs |> List.map (List_.hd_exn "unexpected empty list") |> uniq_eff
+        xs |> List_.map (List_.hd_exn "unexpected empty list") |> uniq_eff
       in
       match topsubdirs with
       | [ x ] ->
           aux (x :: current_candidate)
-            (xs |> List.map (List_.tl_exn "unexpected empty list"))
+            (xs |> List_.map (List_.tl_exn "unexpected empty list"))
       | _ -> List.rev current_candidate
     with
     | _ -> List.rev current_candidate
@@ -5002,7 +4971,7 @@ let _ = example
 let inits_of_absolute_dir dir =
   if not (is_absolute dir) then
     failwith (spf "inits_of_absolute_dir: %s is not an absolute path" dir);
-  if not (UFile.is_directory (Fpath.v dir)) then
+  if not (UFile.is_dir ~follow_symlinks:true (Fpath.v dir)) then
     failwith (spf "inits_of_absolute_dir: %s is not a directory" dir);
   let dir = chop_dirsymbol dir in
 
@@ -5012,7 +4981,7 @@ let inits_of_absolute_dir dir =
     | [ "." ] -> []
     | _ -> dirs
   in
-  inits dirs |> List.map (fun xs -> "/" ^ join "/" xs)
+  inits dirs |> List_.map (fun xs -> "/" ^ join "/" xs)
 
 let inits_of_relative_dir dir =
   if not (is_relative dir) then
@@ -5027,7 +4996,7 @@ let inits_of_relative_dir dir =
   in
   inits dirs
   |> List_.tl_exn "unexpected empty list"
-  |> List.map (fun xs -> join "/" xs)
+  |> List_.map (fun xs -> join "/" xs)
 
 (*
 let _ = example
@@ -5043,7 +5012,7 @@ let (tree_of_files : filename list -> (string, string * filename) tree) =
   let files_fullpath = files in
 
   (* extract dirs and file from file, e.g. ["home";"pad"], "__flib.php", path *)
-  let files = files |> List.map dirs_and_base_of_file in
+  let files = files |> List_.map dirs_and_base_of_file in
 
   (* find root, eg ["home";"pad"] *)
   let root = find_common_root files in
@@ -5053,7 +5022,7 @@ let (tree_of_files : filename list -> (string, string * filename) tree) =
   (* remove the root part *)
   let files =
     files
-    |> List.map (fun ((dirs, base), path) ->
+    |> List_.map (fun ((dirs, base), path) ->
            let n = List.length root in
            let root', rest = (take n dirs, drop n dirs) in
            assert (root' =*= root);
@@ -5075,16 +5044,16 @@ let (tree_of_files : filename list -> (string, string * filename) tree) =
 
     let nodes =
       groups
-      |> List.map (fun (k, xs) ->
+      |> List_.map (fun (k, xs) ->
              let xs' =
                xs
-               |> List.map (fun ((dirs, base), path) ->
+               |> List_.map (fun ((dirs, base), path) ->
                       ((List_.tl_exn "unexpected empty list" dirs, base), path))
              in
              Node (k, aux xs'))
     in
     let leaves =
-      files_here |> List.map (fun ((_dir, base), path) -> Leaf (base, path))
+      files_here |> List_.map (fun ((_dir, base), path) -> Leaf (base, path))
     in
     nodes @ leaves
   in
@@ -5092,13 +5061,13 @@ let (tree_of_files : filename list -> (string, string * filename) tree) =
 
 (* finding the common root *)
 let common_prefix_of_files_or_dirs xs =
-  let xs = xs |> List.map relative_to_absolute in
+  let xs = xs |> List_.map relative_to_absolute in
   match xs with
   | [] -> failwith "common_prefix_of_files_or_dirs: empty list"
   | [ x ] -> x
   | _y :: _ys ->
       (* todo: work when dirs ?*)
-      let xs = xs |> List.map dirs_and_base_of_file in
+      let xs = xs |> List_.map dirs_and_base_of_file in
       let dirs = find_common_root xs in
       "/" ^ join "/" dirs
 

@@ -16,8 +16,8 @@
 (*****************************************************************************)
 (* Prelude *)
 (*****************************************************************************)
-module Request = Cohttp_lwt.Request
-module Response = Cohttp_lwt.Response
+module Request = Cohttp.Request
+module Response = Cohttp.Response
 module Body = Cohttp_lwt.Body
 module Header = Cohttp.Header
 
@@ -36,24 +36,25 @@ module Make (M : S) : Cohttp_lwt.S.Client = struct
   open M
 
   type ctx = unit
+  type 'a with_context = ?ctx:ctx -> 'a
+  type 'a io = 'a Lwt.t
+  type body = Cohttp_lwt.Body.t
 
-  let callv ?ctx _ _ =
-    ignore ctx;
-    failwith "Not implemented"
+  let map_context (x : 'a with_context) (f : 'a -> 'b) ?ctx = x ?ctx |> f
 
-  let head ?ctx ?headers _ =
-    ignore ctx;
-    ignore headers;
-    failwith "Not implemented"
-
-  let post_form ?ctx ?headers ~params _ =
-    ignore ctx;
-    ignore headers;
-    ignore params;
-    failwith "Not implemented"
+  let mock_response_of_request (req : Cohttp.Request.t) (body : Body.t) =
+    Logs.debug (fun m ->
+        m "[Testing client] Request: %s"
+          (Request.sexp_of_t req |> Sexplib.Sexp.to_string_hum));
+    let%lwt _body = Body.to_string body in
+    Logs.debug (fun m -> m "[Testing client] Body: %s" _body);
+    let%lwt response = make_response req body in
+    Lwt.return (response.response, response.body)
 
   let call ?ctx ?headers ?(body = `Empty) ?chunked meth uri =
     ignore ctx;
+    Logs.debug (fun m ->
+        m "[Testing client] Request URI: %s" (Uri.to_string uri));
     let headers =
       match headers with
       | None -> Header.init ()
@@ -65,13 +66,14 @@ module Make (M : S) : Cohttp_lwt.S.Client = struct
       | None -> false
     in
     let req = Request.make_for_client ~headers ~chunked meth uri in
-    Logs.debug (fun m ->
-        m "[Testing client] Request: %s"
-          (Request.sexp_of_t req |> Sexplib.Sexp.to_string_hum));
-    let%lwt _body = Body.to_string body in
-    Logs.debug (fun m -> m "[Testing client] Body: %s" _body);
-    let%lwt response = make_response req body in
-    Lwt.return (response.response, response.body)
+    mock_response_of_request req body
+
+  let head ?ctx ?headers _ =
+    ignore ctx;
+    ignore headers;
+    failwith
+      "head is not implemented in the HTTP mock client. If you need this \
+       functionality, please implement it."
 
   let get ?ctx ?headers uri = call ?ctx ?headers `GET uri
 
@@ -86,6 +88,30 @@ module Make (M : S) : Cohttp_lwt.S.Client = struct
 
   let patch ?ctx ?body ?chunked ?headers uri =
     call ?ctx ?headers ?body ?chunked `PATCH uri
+
+  let set_cache _ =
+    failwith
+      "http set_cache is not implemented in the HTTP mock client. If you need \
+       this functionality, please implement it."
+
+  let post_form ?ctx ?headers ~params _ =
+    ignore ctx;
+    ignore headers;
+    ignore params;
+    failwith
+      "post_form is not implemented in the HTTP mock client. If you need this \
+       functionality, please implement it."
+
+  let callv ?ctx uri (reqs : (Cohttp.Request.t * Body.t) Lwt_stream.t) =
+    ignore ctx;
+    Logs.debug (fun m ->
+        m "[Testing client] Request URI: %s" (Uri.to_string uri));
+    let response_stream =
+      Lwt_stream.map_s
+        (fun (req, body) -> mock_response_of_request req body)
+        reqs
+    in
+    Lwt.return response_stream
 end
 
 (*****************************************************************************)
@@ -94,11 +120,11 @@ end
 
 let basic_response ?(status = 200) ?(headers = Header.init ()) body =
   let status = Cohttp.Code.status_of_code status in
-  let response = Response.make ~status ~headers ~flush:true () in
+  let response = Response.make ~status ~headers () in
   { response; body }
 
-let body_of_file ?(trim = false) path =
-  let content = UCommon.read_file path in
+let body_of_file ?(trim = false) (path : Fpath.t) =
+  let content = UFile.read_file path in
   let content = if trim then String.trim content else content in
   Cohttp_lwt.Body.of_string content
 
@@ -129,7 +155,7 @@ let check_header req header header_val =
      unconditional print to stderr of the string "Assert <name>". *)
   | Some actual_header -> Alcotest.(check string) "" header_val actual_header
 
-let check_headers expected_headers actual_headers =
+let check_headers actual_headers expected_headers =
   let lowercase_and_sort xs =
     xs
     |> List_.map (fun (x, y) -> (String.lowercase_ascii x, y))
@@ -139,10 +165,60 @@ let check_headers expected_headers actual_headers =
   let expected_headers =
     expected_headers |> Header.to_list |> lowercase_and_sort
   in
-  (* Passing "" for the name of the check prevents an otherwise
-     unconditional print to stderr of the string "Assert <name>". *)
-  Alcotest.(check (list (pair string string)))
-    "" expected_headers actual_headers
+  let pp = Alcotest.(pp (list (pair string string))) in
+
+  let rec check = function
+    | [], [] -> ()
+    | (_ :: _ as expected_headers), [] ->
+        Alcotest.failf "Missing some expected headers:\n%a" (Fmt.styled `Red pp)
+          expected_headers
+    | [], (_ :: _ as actual_headers) ->
+        Alcotest.failf "Found some unexpected headers:\n%a" (Fmt.styled `Red pp)
+          actual_headers
+    | ( (expected_header, expected_value) :: expected_headers,
+        (actual_header, actual_value) :: actual_headers ) ->
+        if String.equal expected_header actual_header then
+          let value_regex =
+            if
+              String.starts_with ~prefix:"regex{" expected_value
+              && String.ends_with ~suffix:"}" expected_value
+            then
+              Pcre2_.regexp
+                (String.sub expected_value 6 (String.length expected_value - 7))
+            else Pcre2_.regexp (Pcre2_.quote expected_value)
+          in
+          match
+            Pcre2_.pmatch
+              ~flags:[ `ANCHORED; `ENDANCHORED ]
+              ~rex:value_regex actual_value
+          with
+          | Ok true -> check (expected_headers, actual_headers)
+          | Ok false ->
+              Alcotest.failf
+                "Header values for '%a' do not match\n\
+                 Expected:\n\
+                 %a\n\
+                 Received:\n\
+                 \"%a\""
+                (Fmt.styled `Bold Fmt.string)
+                expected_header
+                (Fmt.styled `Green Pcre2_.pp)
+                value_regex
+                (Fmt.styled `Red Fmt.string)
+                actual_value
+          | Error err -> Alcotest.failf "Invalid regex: %a" Pcre2_.pp_error err
+        else
+          Alcotest.failf
+            "Expected header '%a', but it was either missing, or header counts \
+             did not match up"
+            (Fmt.styled `Bold Fmt.string)
+            expected_header
+  in
+  check (expected_headers, actual_headers)
+(* (* Passing "" for the name of the check prevents an otherwise
+      unconditional print to stderr of the string "Assert <name>". *)
+   Alcotest.(check (list (pair string string)))
+     "" expected_headers actual_headers *)
 
 let get_header req header =
   Cohttp.Header.get (Cohttp.Request.headers req) header
@@ -157,8 +233,9 @@ let with_testing_client make_fn test_fn () =
       let make_response = make_fn
     end))
   in
-  Common.save_excursion Http_helpers.in_mock_context true (fun () ->
-      Common.save_excursion Http_helpers.client_ref (Some new_client) test_fn)
+  Http_helpers.with_client_ref new_client
+    (fun () -> Common.save_excursion Http_helpers.in_mock_context true test_fn)
+    ()
 
 (*****************************************************************************)
 (* Saved Request/Reponse Mocking *)
@@ -234,15 +311,8 @@ let parse_req =
           in
           let headers = parse_headers headers in
           let body = String.concat "\n" body |> Body.of_string in
-          ( {
-              Cohttp.Request.meth;
-              resource;
-              version;
-              headers;
-              scheme = None;
-              encoding = Body.transfer_encoding body;
-            },
-            body ))
+          let uri = Uri.of_string resource in
+          (Cohttp.Request.make ~meth ~version ~headers uri, body))
 
 let parse_resp =
   strip_and_parse "< " (fun lines ->
@@ -255,20 +325,10 @@ let parse_resp =
           in
           let headers = parse_headers headers in
           let body = String.concat "\n" body |> Body.of_string in
-          ( {
-              Cohttp.Response.version;
-              headers;
-              status;
-              (* Not sure exactly how cohttp uses this. Not documented.
-               * Doesn't seem like there's any buffering in our tests anyway.
-               *)
-              flush = true;
-              encoding = Body.transfer_encoding body;
-            },
-            body ))
+          (Cohttp.Response.make ~version ~status ~headers (), body))
 
-let client_from_file req_resp_file =
-  let contents = UCommon.read_file req_resp_file in
+let client_from_file (req_resp_file : Fpath.t) =
+  let contents = UFile.read_file req_resp_file in
   let rec go s acc =
     if String.length s = 0 then acc
     else if not (List.mem (String.get s 0) [ '>'; '<' ]) then
@@ -301,6 +361,6 @@ let client_from_file req_resp_file =
   ( new_client,
     fun f ->
       f
-      @@ List_.map_filter
+      @@ List_.filter_map
            (fun (req, resp, used) -> if !used then None else Some (req, resp))
            pairs )

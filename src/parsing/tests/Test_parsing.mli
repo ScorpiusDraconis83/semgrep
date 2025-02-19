@@ -10,23 +10,26 @@
  *   {"total":111,"bad":0,"percent_correct":100.0}
  *)
 val parsing_stats :
-  ?json:bool -> ?verbose:bool -> Lang.t -> string (* filename *) list -> unit
-
-(* TODO: parsing regressions as in pfff (unfinished) *)
-val parsing_regressions : Lang.t -> string (* filename *) list -> unit
+  < Cap.time_limit ; Cap.memory_limit ; Cap.readdir ; .. > ->
+  ?json:bool ->
+  ?verbose:bool ->
+  Lang.t ->
+  string (* filename *) list ->
+  unit
 
 (* Similar to [parsing_stats], but uses only tree-sitter parsers,
  * and stop the parsing at the tree-sitter CST level (it does not
  * try to convert this CST in the generic AST).
  *)
-val test_parse_tree_sitter : Lang.t -> string (* filename *) list -> unit
+val test_parse_tree_sitter :
+  < Cap.readdir ; .. > -> Lang.t -> Fpath.t (* root *) -> unit
 
 (* Dump the tree-sitter CST of the given file (it automatically detects
  * the language and parser to use based on the filename extension). *)
-val dump_tree_sitter_cst : Lang.t -> string (* filename *) -> unit
+val dump_tree_sitter_cst : Lang.t -> Fpath.t -> unit
 
 (* Dump the generic AST of the given file but only use a pfff parser *)
-val dump_pfff_ast : Lang.t -> string (* filename *) -> unit
+val dump_pfff_ast : Lang.t -> Fpath.t -> unit
 
 (* Dump the lang-specific AST of the given file *)
 val dump_lang_ast : Lang.t -> Fpath.t -> unit
@@ -36,10 +39,10 @@ val dump_lang_ast : Lang.t -> Fpath.t -> unit
  * in the generic ASTs produced (internally using the Unix diff program
  * on the dumped ASTs).
  *)
-val diff_pfff_tree_sitter : string (* filename *) list -> unit
+val diff_pfff_tree_sitter : Fpath.t list -> unit
 
-(* [test_parse_rules paths] recursively explores [paths] to
+(* [test_parse_rules caps root] recursively explores [root] to
  * find YAML files containing rules and check if they
  * parse correctly using Parse_rule.parse.
  *)
-val test_parse_rules : string (* filename *) list -> unit
+val test_parse_rules : < Cap.readdir ; .. > -> Fpath.t (* root *) -> unit

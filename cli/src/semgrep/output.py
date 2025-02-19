@@ -1,4 +1,5 @@
 import dataclasses
+import os
 import pathlib
 import sys
 from collections import defaultdict
@@ -8,6 +9,7 @@ from typing import Any
 from typing import Collection
 from typing import Dict
 from typing import FrozenSet
+from typing import Iterator
 from typing import List
 from typing import Mapping
 from typing import NamedTuple
@@ -20,6 +22,8 @@ from typing import Type
 import requests
 from boltons.iterutils import partition
 
+import semgrep.app.auth as auth
+import semgrep.formatter.base as base
 import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semgrep.console import console
 from semgrep.console import Title
@@ -29,7 +33,6 @@ from semgrep.engine import EngineType
 from semgrep.error import FINDINGS_EXIT_CODE
 from semgrep.error import SemgrepCoreError
 from semgrep.error import SemgrepError
-from semgrep.formatter.base import BaseFormatter
 from semgrep.formatter.emacs import EmacsFormatter
 from semgrep.formatter.gitlab_sast import GitlabSastFormatter
 from semgrep.formatter.gitlab_secrets import GitlabSecretsFormatter
@@ -56,7 +59,7 @@ from semgrep.verbose_logging import getLogger
 logger = getLogger(__name__)
 
 
-FORMATTERS: Mapping[OutputFormat, Type[BaseFormatter]] = {
+FORMATTERS: Mapping[OutputFormat, Type[base.BaseFormatter]] = {
     OutputFormat.EMACS: EmacsFormatter,
     OutputFormat.GITLAB_SAST: GitlabSastFormatter,
     OutputFormat.GITLAB_SECRETS: GitlabSecretsFormatter,
@@ -67,11 +70,16 @@ FORMATTERS: Mapping[OutputFormat, Type[BaseFormatter]] = {
     OutputFormat.VIM: VimFormatter,
 }
 
+# Experiment and Inventory are not below on purpose
 DEFAULT_SHOWN_SEVERITIES: Collection[out.MatchSeverity] = frozenset(
     {
         out.MatchSeverity(out.Info()),
+        out.MatchSeverity(out.Low()),
         out.MatchSeverity(out.Warning()),
+        out.MatchSeverity(out.Medium()),
         out.MatchSeverity(out.Error()),
+        out.MatchSeverity(out.High()),
+        out.MatchSeverity(out.Critical()),
     }
 )
 
@@ -110,11 +118,36 @@ def _build_time_json(
     )
 
 
-# WARNING: this class is unofficially part of our external API. It can be passed
-# as an argument to our official API: 'semgrep_main.invoke_semgrep'. Try to minimize
-# changes to this API, and make them backwards compatible, if possible.
+# This class is the internal representation of OutputSettings below.
+# Since it is internal it can change as much as necesarry to make
+# typechecking more accurate and enforce invariants.
+class NormalizedOutputSettings(NamedTuple):
+    # Immutable List of OutputDestination x OutputFormat
+    outputs: Dict[Optional[str], OutputFormat]
+    output_per_finding_max_lines_limit: Optional[int]
+    output_per_line_max_chars_limit: Optional[int]
+    error_on_findings: bool
+    verbose_errors: bool
+    strict: bool
+    output_time: bool
+    timeout_threshold: int
+    dataflow_traces: bool
+    # alt: put that in terminal.py, which can then be accessed globally
+    max_log_list_entries: int
+
+    def get_outputs(self) -> Iterator[Tuple[Optional[str], OutputFormat]]:
+        return self.outputs.items().__iter__()
+
+    def has_output_format(self, other: OutputFormat) -> bool:
+        return bool(sum(1 for (_, fmt) in self.get_outputs() if other == fmt))
+
+    def has_text_output(self) -> bool:
+        return self.has_output_format(OutputFormat.TEXT)
+
+
 class OutputSettings(NamedTuple):
-    output_format: OutputFormat
+    outputs: Optional[Dict[Optional[str], OutputFormat]] = None
+    output_format: Optional[OutputFormat] = None
     output_destination: Optional[str] = None
     output_per_finding_max_lines_limit: Optional[int] = None
     output_per_line_max_chars_limit: Optional[int] = None
@@ -124,6 +157,35 @@ class OutputSettings(NamedTuple):
     output_time: bool = False
     timeout_threshold: int = 0
     dataflow_traces: bool = False
+    max_log_list_entries: int = 0
+
+    def normalize(self) -> NormalizedOutputSettings:
+        normalized_outputs: Dict[Optional[str], OutputFormat] = {}
+        if self.output_format is None:
+            if self.outputs is None:
+                raise RuntimeError(f"Invalid output configuration: No output specified")
+            normalized_outputs = self.outputs.copy()
+        else:
+            if self.outputs is not None:
+                normalized_outputs = self.outputs.copy()
+            if self.output_destination in normalized_outputs:
+                raise RuntimeError(
+                    "Invalid output configuration: same output destination with multiple formats."
+                )
+            normalized_outputs[self.output_destination] = self.output_format
+
+        return NormalizedOutputSettings(
+            outputs=normalized_outputs,
+            output_per_finding_max_lines_limit=self.output_per_finding_max_lines_limit,
+            output_per_line_max_chars_limit=self.output_per_line_max_chars_limit,
+            error_on_findings=self.error_on_findings,
+            verbose_errors=self.verbose_errors,
+            strict=self.strict,
+            output_time=self.output_time,
+            timeout_threshold=self.timeout_threshold,
+            dataflow_traces=self.dataflow_traces,
+            max_log_list_entries=self.max_log_list_entries,
+        )
 
 
 class OutputHandler:
@@ -146,7 +208,7 @@ class OutputHandler:
         self,
         output_settings: OutputSettings,
     ):
-        self.settings = output_settings
+        self.settings: NormalizedOutputSettings = output_settings.normalize()
 
         self.rule_matches: List[RuleMatch] = []
         self.all_targets: Set[Path] = set()
@@ -163,20 +225,30 @@ class OutputHandler:
         self.engine_type: EngineType = EngineType.OSS
 
         self.final_error: Optional[Exception] = None
-        formatter_type = FORMATTERS.get(self.settings.output_format)
-        if formatter_type is None:
-            raise RuntimeError(f"Invalid output format: {self.settings.output_format}")
 
-        self.formatter = formatter_type()
+        self._formatters: Dict[Optional[str], base.BaseFormatter] = {}
+
+        for output_destination, output_format in self.settings.get_outputs():
+            formatter: Optional[base.BaseFormatter] = None
+            if formatter is None:
+                formatter_type = FORMATTERS.get(output_format)
+                if formatter_type is not None:
+                    formatter = formatter_type()
+            if formatter is None:
+                raise RuntimeError(f"Invalid output format: {output_format}")
+
+            self._formatters[output_destination] = formatter
 
     def handle_semgrep_errors(self, errors: Sequence[SemgrepError]) -> None:
         timeout_errors = defaultdict(list)
+        missing_plugin_errors = []
         for err in errors:
             if (
                 isinstance(err, SemgrepCoreError)
                 and err.is_timeout()
                 and err not in self.error_set
             ):
+                assert err.core.location
                 self.semgrep_structured_errors.append(err)
                 self.error_set.add(err)
 
@@ -188,12 +260,26 @@ class OutputHandler:
                     timeout_errors[Path(err.core.location.path.value)].append(
                         err.core.rule_id.value
                     )
+            elif (
+                isinstance(err, SemgrepCoreError)
+                and err.is_missing_plugin()
+                and err not in self.error_set
+            ):
+                # THINK: These perhaps should not be errors but reported as "skipped"
+                self.semgrep_structured_errors.append(err)
+                self.error_set.add(err)
+
+                if err.core.rule_id:
+                    missing_plugin_errors.append(err.core.rule_id.value)
             else:
                 self._handle_semgrep_error(err)
 
-        if timeout_errors and self.settings.output_format == OutputFormat.TEXT:
+        if timeout_errors and self.settings.has_text_output():
             t_errors = dict(timeout_errors)  # please mypy
             self._handle_semgrep_timeout_errors(t_errors)
+
+        if missing_plugin_errors and self.settings.has_text_output():
+            self._handle_semgrep_missing_plugin_errors(missing_plugin_errors)
 
     def _handle_semgrep_timeout_errors(self, errors: Dict[Path, List[str]]) -> None:
         self.has_output = True
@@ -218,6 +304,13 @@ class OutputHandler:
                 )
             )
 
+    def _handle_semgrep_missing_plugin_errors(self, errors: List[str]) -> None:
+        self.has_output = True
+        num_errs = len(errors)
+        if num_errs >= 1:
+            error_msg = f"Warning: {num_errs} rule(s) were skipped because they require Pro (try `--pro`), for example: {errors[0]}"
+            logger.error(with_color(Colors.red, terminal_wrap(error_msg)))
+
     def _handle_semgrep_error(self, error: SemgrepError) -> None:
         """
         Reports generic exceptions that extend SemgrepError
@@ -226,7 +319,7 @@ class OutputHandler:
         if error not in self.error_set:
             self.semgrep_structured_errors.append(error)
             self.error_set.add(error)
-            if self.settings.output_format == OutputFormat.TEXT and (
+            if self.settings.has_text_output() and (
                 not (isinstance(error.level.value, out.Warning_))
                 or self.settings.verbose_errors
             ):
@@ -246,6 +339,7 @@ class OutputHandler:
         else:
             raise ex
 
+    # group semgrep core errors by path
     @staticmethod
     def _make_failed_to_analyze(
         semgrep_core_errors: Sequence[SemgrepCoreError],
@@ -254,6 +348,8 @@ class OutputHandler:
             memo: Mapping[Path, Tuple[Optional[int], List[out.RuleId]]],
             err: SemgrepCoreError,
         ) -> Mapping[Path, Tuple[Optional[int], List[out.RuleId]]]:
+            if not err.core.location:
+                return memo
             path = Path(err.core.location.path.value)
             so_far = memo.get(path, (0, []))
             if err.spans is None or so_far[0] is None:
@@ -269,6 +365,15 @@ class OutputHandler:
             return {**memo, path: (num_lines, rule_ids)}
 
         return reduce(update_failed_to_analyze, semgrep_core_errors, {})
+
+    def keep_ignores(self) -> bool:
+        return bool(
+            sum(
+                1
+                for dest in self.settings.outputs
+                if self._formatters[dest].keep_ignores()
+            )
+        )
 
     # TODO: why run_scan.scan() calls output() to set the fields why
     # run_scan.run_scan_and_return_json() modify directly the fields instead?
@@ -308,7 +413,11 @@ class OutputHandler:
         else:
             # ignore log was not created, so the run failed before it even started
             # create a fake log to track the errors
-            self.ignore_log = FileTargetingLog(TargetManager(frozenset([Path(".")])))
+            self.ignore_log = FileTargetingLog(
+                TargetManager(
+                    scanning_root_strings=frozenset([Path(".")]),
+                )
+            )
 
         if extra:
             self.extra = extra
@@ -345,19 +454,19 @@ class OutputHandler:
             self.ignore_log.core_failure_lines_by_file = failed_to_analyze_lines_by_path
 
         if self.has_output:
-            output = self._build_output()
-            if self.settings.output_destination:
-                self._save_output(self.settings.output_destination, output)
-            else:
-                if output:
-                    try:
-                        # console.print() would go to stderr; here we print() directly to stdout
-                        # the output string is already pre-formatted by semgrep.console
-                        print(output)
-                    except UnicodeEncodeError as ex:
-                        raise Exception(
-                            "Received output encoding error, please set PYTHONIOENCODING=utf-8"
-                        ) from ex
+            for output_destination, output in self._build_outputs():
+                if output_destination:
+                    self._save_output(output_destination, output)
+                else:
+                    if output:
+                        try:
+                            # console.print() would go to stderr; here we print() directly to stdout
+                            # the output string is already pre-formatted by semgrep.console
+                            print(output)
+                        except UnicodeEncodeError as ex:
+                            raise Exception(
+                                "Received output encoding error, please set PYTHONIOENCODING=utf-8"
+                            ) from ex
 
         if self.filtered_rules:
             fingerprint_matches, regular_matches = partition(
@@ -379,7 +488,7 @@ class OutputHandler:
                 and num_targets > 0
                 and num_rules > 0
                 and state.metrics.is_using_registry
-                and state.app_session.token is None
+                and (not auth.is_logged_in_weak())
             ):
                 suggestion_line = "\n(need more rules? `semgrep login` for additional free Semgrep Registry rules)\n"
             stats_line = ""
@@ -389,9 +498,15 @@ class OutputHandler:
                     missed_rule_count
                     and state.get_cli_ux_flavor() != DesignTreatment.LEGACY
                 ):
-                    stats_line = f"{stats_line}\n💎 Missed out on {unit_str(missed_rule_count, 'pro rule')} since you aren't logged in!"
+                    missed_count_line = f"💎 Missed out on {unit_str(missed_rule_count, 'pro rule')} since you aren't logged in!"
+                    learn_more_url = with_color(
+                        Colors.cyan, "https://sg.run/rules", underline=True
+                    )
+                    learn_more_line = f"⚡ Supercharge Semgrep OSS when you create a free account at {learn_more_url}."
+                    stats_line = f"{stats_line}\n{missed_count_line}\n{learn_more_line}"
             if ignore_log is not None:
-                logger.verbose(ignore_log.verbose_output())
+                too_many_entries = self.settings.max_log_list_entries
+                logger.verbose(ignore_log.verbose_output(too_many_entries))
 
             output_text = ignores_line + suggestion_line + stats_line
             console.print(Title("Scan Summary"))
@@ -422,7 +537,13 @@ class OutputHandler:
         except requests.exceptions.Timeout:
             raise SemgrepError(f"posting output to {output_url} timed out")
 
-    def _build_output(self) -> str:
+    def _build_outputs(self) -> Iterator[Tuple[Optional[str], str]]:
+        for output_destination, output_format in self.settings.get_outputs():
+            yield self._build_output(output_destination, output_format)
+
+    def _build_output(
+        self, output_destination: Optional[str], output_format: OutputFormat
+    ) -> Tuple[Optional[str], str]:
         # CliOutputExtra members
         cli_paths = out.ScannedAndSkipped(
             # This is incorrect when some rules are skipped by semgrep-core
@@ -435,11 +556,6 @@ class OutputHandler:
 
         explanations: Optional[List[out.MatchingExplanation]] = self.explanations
 
-        # Extra, extra! This just in! 🗞️
-        # The extra dict is for blatantly skipping type checking and function signatures.
-        # - The text formatter uses it to store settings
-        # You should use CliOutputExtra for better type checking
-        extra: Dict[str, Any] = {}
         if self.settings.output_time and self.extra and self.extra.core.time:
             cli_timing = _build_time_json(
                 self.filtered_rules,
@@ -447,6 +563,13 @@ class OutputHandler:
                 self.extra.core.time,
                 self.profiler,
             )
+
+        # DO NOT USE THIS local!
+        # The extra dict is for blatantly skipping type checking and function signatures.
+        # - The text formatter uses it to store settings
+        # You should use CliOutputExtra for better type checking
+        extra: Dict[str, Any] = {}
+
         if self.settings.verbose_errors:
             # TODO: use SkippedTarget directly in ignore_log or in yield_json_objects at least
             skipped = sorted(
@@ -463,10 +586,11 @@ class OutputHandler:
                 ],
             )
             extra["verbose_errors"] = True
-        if self.settings.output_format == OutputFormat.TEXT:
+        if output_format == OutputFormat.TEXT:
             extra["color_output"] = (
-                self.settings.output_destination is None and sys.stdout.isatty(),
-            )
+                (output_destination is None and sys.stdout.isatty())
+                or os.environ.get("SEMGREP_FORCE_COLOR")
+            ) and not os.environ.get("NO_COLOR")
             extra[
                 "per_finding_max_lines_limit"
             ] = self.settings.output_per_finding_max_lines_limit
@@ -474,7 +598,7 @@ class OutputHandler:
                 "per_line_max_chars_limit"
             ] = self.settings.output_per_line_max_chars_limit
             extra["dataflow_traces"] = self.settings.dataflow_traces
-        if self.settings.output_format == OutputFormat.SARIF:
+        if output_format == OutputFormat.SARIF:
             extra["dataflow_traces"] = self.settings.dataflow_traces
 
         # as opposed to below, we need to distinguish the various kinds of pro engine
@@ -482,33 +606,43 @@ class OutputHandler:
 
         # TODO: I thought we could guard this code with 'if self.extra:', and raise
         # a SemgrepError otherwise, but it seems that when semgrep got an error
-        # (for example in tests/e2e/test_ci.py::test_bad_config),
+        # (for example in tests/default/e2e/test_ci.py::test_bad_config),
         # then this code still get called and self.extra is not set but we still want
         # to output things. This is why I have those ugly 'if self.extra' below
         # that possibly return None.
 
-        # the rules are used only by the SARIF formatter
-        return self.formatter.output(
+        cli_output_extra = out.CliOutputExtra(
+            # TODO: almost like self.extra.core.paths, but not there yet
+            paths=cli_paths,
+            # TODO: almost like self.extra.core.time, but not there yet
+            time=cli_timing,
+            # TODO: would like t ouse self.extra.core.explanations byt regressions
+            explanations=explanations,
+            rules_by_engine=self.extra.core.rules_by_engine if self.extra else None,
+            # this flattens the information into just distinguishing "pro" and "not-pro"
+            engine_requested=self.engine_type.to_engine_kind(),
+            interfile_languages_used=self.extra.core.interfile_languages_used
+            if self.extra
+            else None,
+            # TODO, should just be self.extra.core.skipped_rules
+            skipped_rules=[],
+        )
+
+        state = get_state()
+        formatter = self._formatters[output_destination]
+        output = formatter.output(  # the rules are used only by the SARIF formatter
             self.rules,
             self.rule_matches,
             self.semgrep_structured_errors,
-            out.CliOutputExtra(
-                # TODO: almost like self.extra.core.paths, but not there yet
-                paths=cli_paths,
-                # TODO: almost like self.extra.core.time, but not there yet
-                time=cli_timing,
-                # TODO: would like t ouse self.extra.core.explanations byt regressions
-                explanations=explanations,
-                rules_by_engine=self.extra.core.rules_by_engine if self.extra else None,
-                # this flattens the information into just distinguishing "pro" and "not-pro"
-                engine_requested=self.engine_type.to_engine_kind(),
-                interfile_languages_used=self.extra.core.interfile_languages_used
-                if self.extra
-                else None,
-                # TODO, should just be self.extra.core.skipped_rules
-                skipped_rules=[],
-            ),
+            cli_output_extra,
             extra,
             self.severities,
-            is_ci_invocation=self.is_ci_invocation,
+            out.FormatContext(
+                is_ci_invocation=self.is_ci_invocation,
+                is_logged_in=auth.is_logged_in_weak(),
+                # If users are not using our registry, we will not nudge them to login
+                is_using_registry=state.metrics.is_using_registry
+                or state.env.mock_using_registry,
+            ),
         )
+        return (output_destination, output)

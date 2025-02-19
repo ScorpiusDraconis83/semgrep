@@ -13,9 +13,9 @@ from typing import Union
 import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semgrep.constants import RuleScanSource
 from semgrep.error import InvalidRuleSchemaError
+from semgrep.error_location import Span
 from semgrep.rule_lang import EmptySpan
 from semgrep.rule_lang import RuleValidation
-from semgrep.rule_lang import Span
 from semgrep.rule_lang import YamlMap
 from semgrep.rule_lang import YamlTree
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
@@ -45,12 +45,12 @@ class Rule:
         def resolve_language_string(language_str: str) -> Language:
             # Replace "generic" in the "languages" list by the engine specified
             # in the options section.
-            xlang_str = (
+            analyzer_str = (
                 self.options_dict.get("generic_engine", "spacegrep")
                 if language_str == "generic"
                 else language_str
             )
-            return LANGUAGE.resolve(xlang_str, lang_span)
+            return LANGUAGE.resolve(analyzer_str, lang_span)
 
         rule_languages: Set[Language] = {
             resolve_language_string(l) for l in self._raw.get("languages", [])
@@ -150,6 +150,13 @@ class Rule:
         """
         Returns if this rule indicates matches should block CI
         """
+
+        validation_state_metadata = self.metadata.get(
+            "dev.semgrep.validation_state.actions"
+        )
+        if validation_state_metadata:
+            return "block" in validation_state_metadata.values()
+
         return "block" in self.metadata.get("dev.semgrep.actions", ["block"])
 
     @property
@@ -307,9 +314,12 @@ class Rule:
             for k in sorted(RuleValidation.PATTERN_KEYS):
                 next_raw = self.raw.get(k)
                 if next_raw is not None:
+                    # print(k)
+                    # print(next_raw)
                     patterns_to_add.append(get_subrules(next_raw))
                     if k == "join" and "on" in next_raw:
                         patterns_to_add += get_subrules(next_raw["on"])
+            # print(patterns_to_add)
             res = " ".join(sorted(patterns_to_add))
             if not res:
                 raise ValueError(f"This rule contains no hashable patterns: {self.id}")

@@ -39,7 +39,9 @@ type t = {
   ~symbolic_propagation <ocaml default="false"> : bool;
 
   (* metavariables common to a source and sink will be unified *)
+  (* taint_match_on is DEPRECATED and to be removed after 1.63.0 *)
   ~taint_match_on <ocaml default="`Sink">: taint_match_on;
+  ~taint_focus_on <ocaml default="`Sink">: taint_match_on;
   ~taint_unify_mvars <ocaml default="false"> : bool;
   ~taint_assume_safe_functions <ocaml default="false"> : bool;
   ~taint_assume_safe_indexes <ocaml default="false"> : bool;
@@ -49,13 +51,16 @@ type t = {
   (* when you are paranoid about minimizing FPs, and probably useful for
    * writing secret detection rules *)
   ~taint_only_propagate_through_assignments <ocaml default="false"> : bool;
+  ~taint_interproc_lambdas <ocaml default="true"> : bool;
 
   (* 'ac' stands for associative-commutative matching *)
   ~ac_matching <ocaml default="true"> : bool;
   (* pretend && and || are commutative *)
   (* THINK: Should we merge ac_matching and commutative_boolop into a single setting? *)
   ~commutative_boolop <ocaml default="false"> : bool;
+  (* DEPRECATED: remove me after 1.60.0 *)
   ~commutative_compop <ocaml default="false"> : bool;
+  ~symmetric_eq <ocaml default="false"> : bool;
 
   (* assign-patterns (e.g. `$X = $E`) will match var-defs (e.g. `var x = 1;`) *)
   ~vardef_assign <ocaml default="true"> : bool;
@@ -65,6 +70,7 @@ type t = {
   ~flddef_assign <ocaml default="false"> : bool;
   (* expression patterns (e.g. `f($X)`) will match attributes (e.g. `@f(a)`)  *)
   ~attr_expr <ocaml default="true"> : bool;
+  ~unify_ids_strictly <ocaml default="true"> : bool;
 
   (* treat arrows (a.k.a short lambdas) like other functions *)
   ~arrow_is_function <ocaml default="true">: bool;
@@ -164,6 +170,12 @@ type t = {
      languages that treat the last statement of a block inside
      functions as a return statement, such as Ruby and Julia.  *)
      ~implicit_return <ocaml default="true"> : bool;
+
+  (* non-keyword attributes such as decorators in Python will be matched in order
+   * instead of the default order-agnostic matching. keyword attributes, such as
+   * inline, static, etc, are not affected by this option
+   *)
+  ~decorators_order_matters <ocaml default="false"> : bool;
 
   (* TODO: equivalences:
    *   - require_to_import (but need pass config to Js_to_generic)

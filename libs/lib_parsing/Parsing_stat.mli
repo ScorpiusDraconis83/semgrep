@@ -19,17 +19,17 @@ type t = {
 }
 
 val default_stat : string (* filename *) -> t
-val bad_stat : string (* filename *) -> t
-val correct_stat : string (* filename *) -> t
+val bad_stat : Fpath.t -> t
+val correct_stat : Fpath.t -> t
 
 (*
    Print file name and number of lines and error lines in compact format
    suitable for logging.
 *)
 val summary_of_stat : t -> string
-val print_parsing_stat_list : ?verbose:bool -> t list -> unit
-val print_recurring_problematic_tokens : t list -> unit
+val string_of_stats : ?verbose:bool -> t list -> string
+val recurring_problematic_tokens : t list -> string
 val aggregate_stats : t list -> int * int (* total * bad *)
 
-val print_regression_information :
-  ext:string -> Fpath.t list -> Common2.score -> unit
+val regression_information :
+  ext:string -> Fpath.t list -> Common2.score -> string

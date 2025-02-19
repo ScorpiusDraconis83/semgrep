@@ -6,6 +6,7 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
+import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semdep.parsers.util import DependencyFileToParse
 from semdep.parsers.util import DependencyParserError
 from semdep.parsers.util import safe_parse_lockfile_and_manifest
@@ -14,8 +15,8 @@ from semgrep.rule_lang import YamlMap
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Direct
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
 from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
+from semgrep.semgrep_interfaces.semgrep_output_v1 import Fpath
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Pub
-from semgrep.semgrep_interfaces.semgrep_output_v1 import PubspecLock
 from semgrep.semgrep_interfaces.semgrep_output_v1 import ScaParserName
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Transitive
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Transitivity
@@ -23,7 +24,7 @@ from semgrep.semgrep_interfaces.semgrep_output_v1 import Unknown
 
 
 def parse_pubspec_lock(
-    lockfile_path: Path, _: Optional[Path]
+    lockfile_path: Path, manifest_path: Optional[Path]
 ) -> Tuple[List[FoundDependency], List[DependencyParserError]]:
     parsed_lockfile, _, errors = safe_parse_lockfile_and_manifest(
         DependencyFileToParse(
@@ -31,7 +32,7 @@ def parse_pubspec_lock(
             lambda text: parse_yaml_preserve_spans(
                 text, str(lockfile_path), allow_null=True
             ),
-            ScaParserName(PubspecLock()),
+            ScaParserName(out.PPubspecLock()),
         ),
         None,
     )
@@ -62,6 +63,8 @@ def parse_pubspec_lock(
                     transitivity=transitivity,
                     line_number=key.span.start.line,
                     allowed_hashes={},
+                    lockfile_path=Fpath(str(lockfile_path)),
+                    manifest_path=Fpath(str(manifest_path)) if manifest_path else None,
                 )
             )
     except KeyError:

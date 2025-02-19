@@ -5,7 +5,9 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any
+from typing import BinaryIO
+from typing import cast
 
 import click
 from rich.progress import BarColumn
@@ -34,7 +36,7 @@ def determine_semgrep_pro_path() -> Path:
     core_path = SemgrepCore.path()
     if core_path is None:
         logger.info(
-            "Could not find `semgrep-core` executable so not sure where to install DeepSemgrep"
+            "Could not find `semgrep-core` executable so not sure where to install semgrep-core-proprietary"
         )
         logger.info("There is something wrong with your semgrep installation")
         sys.exit(FATAL_EXIT_CODE)
@@ -59,20 +61,22 @@ def download_semgrep_pro(
     state: SemgrepState, platform_kind: str, destination: Path
 ) -> None:
     url = f"{state.env.semgrep_url}/api/agent/deployments/deepbinary/{platform_kind}?version={__VERSION__}"
+    logger.debug(f"downloading from {url}")
 
     with state.app_session.get(url, timeout=180, stream=True) as r:
         if r.status_code == 401:
             logger.info(
-                "API token not valid. Try to run `semgrep logout` and `semgrep login` again."
+                "API token not valid. Try to run `semgrep logout` and `semgrep login` again. "
+                "Or in CI, ensure your SEMGREP_APP_TOKEN variable is set correctly."
             )
             sys.exit(INVALID_API_KEY_EXIT_CODE)
         if r.status_code == 403:
             logger.warning(
-                "Logged in deployment does not have access to Semgrep Pro Engine beta"
+                "Logged in deployment does not have access to Semgrep Pro Engine"
             )
             # FIXME: Needs to be updated before launch Feb 2023
             logger.warning(
-                "Visit https://semgrep.dev/deep-semgrep-beta for more information."
+                "Visit https://semgrep.dev/products/pro-engine/ for more information."
             )
             sys.exit(FATAL_EXIT_CODE)
         r.raise_for_status()
@@ -85,6 +89,12 @@ def download_semgrep_pro(
 
         file_size = int(r.headers.get("Content-Length", 0))
 
+        # I (nmote) think the typings for this are wrong. This works at runtime,
+        # and when adding the necessary `instanceof` checks to satisfy mypy, I
+        # actually got a runtime failure. Looks like some discrepancy between
+        # http.client.HTTPResponse and urllib3.response.HTTPResponse. Maybe the
+        # typings picked the wrong one?
+        raw_response: BinaryIO = cast(Any, r.raw)
         with Progress(
             TextColumn("{task.description}"),
             BarColumn(),
@@ -93,15 +103,12 @@ def download_semgrep_pro(
             TimeRemainingColumn(),
             console=console,
         ) as progress, destination.open("wb") as f, progress.wrap_file(
-            r.raw, total=file_size, description="Downloading..."
+            raw_response, total=file_size, description="Downloading..."
         ) as r_raw:
             shutil.copyfileobj(r_raw, f)
 
 
-def run_install_semgrep_pro(custom_binary: Optional[str] = None) -> None:
-    state = get_state()
-    state.terminal.configure(verbose=False, debug=False, quiet=False, force_color=False)
-
+def run_install_semgrep_pro() -> None:
     semgrep_pro_path = determine_semgrep_pro_path()
 
     # TODO This is a temporary solution to help offline users
@@ -110,18 +117,29 @@ def run_install_semgrep_pro(custom_binary: Optional[str] = None) -> None:
     if semgrep_pro_path.exists():
         logger.info(f"Overwriting Semgrep Pro Engine already installed!")
 
-    if state.app_session.token is None and custom_binary is None:
-        logger.info("run `semgrep login` before running `semgrep install-semgrep-pro`")
+    state = get_state()
+    if state.app_session.token is None:
+        logger.info(
+            "Run `semgrep login` before running `semgrep install-semgrep-pro`. "
+            "Or in non-interactive environments, ensure your SEMGREP_APP_TOKEN variable is set correctly."
+        )
         sys.exit(INVALID_API_KEY_EXIT_CODE)
 
+    logger.debug(f"platform is {sys.platform}")
+    # TODO: cleanup and use consistent arch name like in pro-release.jsonnet
     if sys.platform.startswith("darwin"):
-        # arm64 is possible. Dunno if other arms are, so let's just check a prefix.
+        # TODO? other arms than arm64? let's just check a prefix.
         if platform.machine().startswith("arm"):
             platform_kind = "osx-arm64"
         else:
             platform_kind = "osx-x86_64"
     elif sys.platform.startswith("linux"):
-        platform_kind = "manylinux"
+        if platform.machine().startswith("arm") or platform.machine().startswith(
+            "aarch"
+        ):
+            platform_kind = "linux-arm64"
+        else:
+            platform_kind = "manylinux"
     else:
         platform_kind = "manylinux"
         logger.info(
@@ -133,11 +151,7 @@ def run_install_semgrep_pro(custom_binary: Optional[str] = None) -> None:
 
     semgrep_pro_path_tmp = semgrep_pro_path.with_suffix(".tmp_download")
 
-    if custom_binary is None:
-        download_semgrep_pro(state, platform_kind, semgrep_pro_path_tmp)
-    else:
-        custom_binary_path = Path(custom_binary)
-        shutil.copy(custom_binary_path, semgrep_pro_path_tmp)
+    download_semgrep_pro(state, platform_kind, semgrep_pro_path_tmp)
 
     # THINK: Do we need to give exec permissions to everybody? Can this be a security risk?
     #        The binary should not have setuid or setgid rights, so letting others
@@ -176,18 +190,12 @@ def run_install_semgrep_pro(custom_binary: Optional[str] = None) -> None:
 
 @click.command()
 @click.option(
-    "--custom-binary",
-    help="Supply a binary to use as semgrep-core-proprietary, rather than downloading it. You are responsible for ensuring compatibility.",
+    "--debug",
+    is_flag=True,
 )
 @handle_command_errors
-def install_semgrep_pro(custom_binary: Optional[str]) -> None:
-    """
-    Install the Semgrep Pro Engine
+def install_semgrep_pro(debug: bool) -> None:
+    state = get_state()
+    state.terminal.configure(verbose=False, debug=debug, quiet=False, force_color=False)
 
-    The binary is installed in the same directory that semgrep-core
-    is installed in.
-
-    Must be logged in and have access to Semgrep Pro Engine beta
-    Visit https://semgrep.dev/deep-semgrep-beta for more information
-    """
-    run_install_semgrep_pro(custom_binary)
+    run_install_semgrep_pro()

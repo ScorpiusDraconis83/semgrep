@@ -42,22 +42,22 @@ languages/typescript/tree-sitter/CST_tree_sitter_typescript.ml
 
 # big files
 /tests/semgrep-rules/libsonnet/metadata/cwe.libsonnet
+*.min.js
 /CHANGELOG.md
 /LICENSE
 
 # big test files
-/cli/tests/e2e/rules/long_message.yaml
+/cli/tests/default/e2e/rules/long_message.yaml
 /cli/tests/performance/
 /tests/perf/
 /tests/precommit_dogfooding/
 /tests/patterns/java/perf_fields.java
 /tests/patterns/ts/perf_fields.ts
-/perf/perf-matching/
 /perf/r2c-rules/
 /perf/rules/
 
 # test snapshots
-/cli/tests/e2e/snapshots
+/cli/tests/default/e2e/snapshots
 
 # mypy stuff
 /cli/stubs

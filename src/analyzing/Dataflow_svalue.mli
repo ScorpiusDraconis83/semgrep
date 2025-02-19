@@ -2,27 +2,9 @@
 
 type mapping = AST_generic.svalue Dataflow_var_env.mapping
 
-(* Indicates guarantees on the return value of a function *)
-(* TODO: This should be AST_generic.svalue, if we need something more complex,
- * then we build it on top of the svalue type. *)
-type constness = Constant | NotConstant [@@deriving show]
-
-val hook_constness_of_function :
-  (AST_generic.expr -> constness option) option ref
-
-val hook_transfer_of_assume :
-  (bool ->
-  IL.exp_kind ->
-  AST_generic.svalue Dataflow_var_env.t ->
-  AST_generic.svalue Dataflow_var_env.t)
-  option
-  ref
-
 val is_symbolic_expr : AST_generic.expr -> bool
-val eq : AST_generic.svalue -> AST_generic.svalue -> bool
-val union : AST_generic.svalue -> AST_generic.svalue -> AST_generic.svalue
 
-val fixpoint : Lang.t -> IL.name list -> IL.cfg -> mapping
+val fixpoint : Lang.t -> IL.fun_cfg -> mapping
 (** Flow-sensitive constant-propagation.
  * !Note that this assumes Naming_AST.resolve has been called before!
 *)
@@ -44,3 +26,16 @@ val update_svalue : IL.cfg -> mapping -> unit
  * svalue info when we have deduced more specific facts, but leaving it
  * untouched otherwise.
 *)
+
+(* deep-scan hook *)
+val hook_constness_of_function :
+  (AST_generic.expr -> AST_generic.svalue option) option Hook.t
+
+(* pro-scan hook *)
+val hook_transfer_of_assume :
+  (bool ->
+  IL.exp_kind ->
+  AST_generic.svalue Dataflow_var_env.t ->
+  AST_generic.svalue Dataflow_var_env.t)
+  option
+  Hook.t

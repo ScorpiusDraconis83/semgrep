@@ -1,6 +1,7 @@
 val is_pro_resolved_global : IL.name -> bool
 (** Test whether a name is global and has been resolved by Pro-naming. *)
 
+val is_class_name : IL.name -> bool
 val exp_of_arg : IL.exp IL.argument -> IL.exp
 
 (** Lvalue/Rvalue helpers working on the IL *)
@@ -21,13 +22,10 @@ val lvar_of_instr_opt : IL.instr -> IL.name option
 val rlvals_of_node : IL.node_kind -> IL.lval list
 (** The lvalues that occur in the RHS of a node. *)
 
-val compare_name : IL.name -> IL.name -> int
-
-(** Useful to instantiate data strutures like Map and Set. *)
-module LvalOrdered : sig
-  type t = IL.lval
-
-  val compare : t -> t -> int
-end
-
 val orig_of_node : IL.node_kind -> IL.orig option
+
+val reachable_nodes : IL.fun_cfg -> IL.node Seq.t
+(** Get the reachable nodes from function's CFG, including the nodes in the lambdas' CFGs. *)
+
+val lval_is_lambda : IL.lambdas_cfgs -> IL.lval -> (IL.name * IL.fun_cfg) option
+(** Lookup an 'lval' in a 'lambdas_cfgs' table to obtain the lambda's CFG. *)

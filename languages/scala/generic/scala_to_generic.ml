@@ -87,7 +87,7 @@ let v_simple_ref = function
       Either.Left v1
   | This (v1, v2) ->
       let _v1TODO = v_option v_ident v1 and v2 = v_tok v2 in
-      Either.Right (G.IdSpecial (G.This, v2) |> G.e)
+      Either.Right (G.N (G.IdSpecial ((G.This, v2), G.empty_id_info ())) |> G.e)
   | Super (v1, v2, v3, v4) ->
       let _v1TODO = v_option v_ident v1
       and v2 = v_tok v2
@@ -95,7 +95,11 @@ let v_simple_ref = function
       and v4 = v_ident v4 in
       let fld = G.FN (G.Id (v4, G.empty_id_info ())) in
       Either.Right
-        (G.DotAccess (G.IdSpecial (G.Super, v2) |> G.e, fake ".", fld) |> G.e)
+        (G.DotAccess
+           ( G.N (G.IdSpecial ((G.Super, v2), G.empty_id_info ())) |> G.e,
+             fake ".",
+             fld )
+        |> G.e)
 
 (* TODO: should not use *)
 let id_of_simple_ref = function
@@ -129,16 +133,21 @@ and v_import_expr tk import_expr =
       v_import_spec tk module_name spec
   | ImportExprMvar id ->
       (* same as Java *)
-      [ G.ImportFrom (tk, G.DottedName [], [ (v_ident id, None) ]) |> G.d ]
+      [
+        G.ImportFrom
+          (tk, G.DottedName [], [ H.mk_import_from_kind (v_ident id) None ])
+        |> G.d;
+      ]
 
 and v_named_selector tk path ((v1, v2) : named_selector) =
   let id = id_of_import_path_elem v1 in
   let alias =
     match v2 with
     | None -> None
-    | Some id -> Some (v_ident_or_wildcard id, G.empty_id_info ())
+    | Some id -> Some (v_ident_or_wildcard id)
   in
-  G.ImportFrom (tk, G.DottedName path, [ (id, alias) ]) |> G.d
+  G.ImportFrom (tk, G.DottedName path, [ H.mk_import_from_kind id alias ])
+  |> G.d
 
 and v_wildcard_selector tk path (x : wildcard_selector) =
   match x with
@@ -160,12 +169,12 @@ and v_import_spec tk path = function
 and v_import (v1, v2) : G.directive list =
   let v1 = v_tok v1 in
   let v2 = v_list (v_import_expr v1) v2 in
-  List.flatten v2
+  List_.flatten v2
 
 and v_export (v1, v2) : G.directive list =
   let v1 = v_tok v1 in
   let v2 = v_list (v_import_expr v1) v2 in
-  List.flatten v2
+  List_.flatten v2
   |> List_.map (fun x ->
          G.OtherDirective (("export", Tok.unsafe_fake_tok "export"), [ G.Dir x ])
          |> G.d)
@@ -195,7 +204,7 @@ and v_literal = function
   | Interpolated (v1, v2, v3) ->
       let v1 = v_ident v1 and v2 = v_list v_encaps v2 and v3 = v_tok v3 in
       let special =
-        G.IdSpecial (G.ConcatString (G.FString (fst v1)), snd v1) |> G.e
+        G.Special (G.ConcatString (G.FString (fst v1)), snd v1) |> G.e
       in
       let args =
         v2
@@ -203,7 +212,7 @@ and v_literal = function
              | Either.Left lit -> G.Arg (G.L lit |> G.e)
              | Either.Right e ->
                  let special =
-                   G.IdSpecial (G.InterpolatedElement, fake "") |> G.e
+                   G.Special (G.InterpolatedElement, fake "") |> G.e
                  in
                  G.Arg (G.Call (special, fb [ G.Arg e ]) |> G.e))
       in
@@ -288,7 +297,7 @@ and v_type_kind = function
       let v1 =
         v_list
           (fun (v1, v2) ->
-            G.Param (G.param_of_type ~pname:(Some (v_ident v1)) (v_type_ v2)))
+            G.Param (G.param_of_type ~pname:(v_ident v1) (v_type_ v2)))
           v1
       in
       let v3 = v_type_ v3 in
@@ -335,7 +344,7 @@ and v_type_kind = function
       G.TyAny v1
 
 and v_refinement v =
-  v_bracket (fun xs -> v_list v_refine_stat xs |> List.flatten) v
+  v_bracket (fun xs -> v_list v_refine_stat xs |> List_.flatten) v
 
 and v_refine_stat v = v_definition v
 
@@ -462,6 +471,14 @@ and v_expr e : G.expr =
       let v1 = v_expr v1 and v2 = v_tok v2 and v3 = v_ident v3 in
       let name = H.name_of_id v3 in
       G.DotAccess (v1, v2, G.FN name) |> G.e
+  | Apply (Name (Id ((s, _t) as id), [ ("apply", apply_tok) ]), [ args ])
+    when String_.is_capitalized s ->
+      New
+        ( apply_tok,
+          TyN (G.Id (id, G.empty_id_info ())) |> G.t,
+          G.empty_id_info (),
+          v_arguments args )
+      |> G.e
   | Apply (v1, v2) ->
       let v1 = v_expr v1 and v2 = v_list v_arguments v2 in
       v2 |> List.fold_left (fun acc xs -> G.Call (acc, xs) |> G.e) v1
@@ -543,8 +560,7 @@ and v_arguments = function
           { e = Call ({ e = N (Id (("*", tok), _)); _ }, (lb', [ e ], rb')); _ }
         :: rest ->
           let splatted_last_arg =
-            G.Call (G.IdSpecial (G.Spread, tok) |> G.e, (lb', [ e ], rb'))
-            |> G.e
+            G.Call (G.Special (G.Spread, tok) |> G.e, (lb', [ e ], rb')) |> G.e
           in
           (lb, List.rev rest @ [ G.Arg splatted_last_arg ], rb)
       | _ -> (lb, v1, rb))
@@ -573,7 +589,7 @@ and v_type_case_clause v : G.case_and_body =
       let icase, l_ty, r_ty = v_type_case_clause_classic x in
       let pat =
         match l_ty with
-        | Either.Left tok -> G.PatUnderscore tok
+        | Either.Left tok -> G.PatWildcard tok
         | Either.Right ty -> PatType ty
       in
       G.CasesAndBody
@@ -584,7 +600,7 @@ and v_case_clause v : G.case_and_body =
   match v with
   | CC x ->
       let icase, p, s = v_case_clause_classic x in
-      G.case_of_pat_and_stmt ~tok:(Some icase) (p, s)
+      G.case_of_pat_and_stmt ~tok:icase (p, s)
   | CaseEllipsis ii -> G.CaseEllipsis ii
 
 and v_case_clause_classic
@@ -761,14 +777,14 @@ and v_catch_clause (v1, v2) : G.catch list =
                (ii, G.CatchPattern (G.PatEllipsis ii), st))
   | CatchExpr e ->
       let e = v_expr e in
-      let pat = G.PatUnderscore v1 in
+      let pat = G.PatWildcard v1 in
       [ (v1, G.CatchPattern pat, G.exprstmt e) ]
 
 and v_finally_clause (v1, v2) =
   let v1 = v_tok v1 and v2 = v_expr_for_stmt v2 in
   (v1, v2)
 
-and v_block v = v_list v_block_stat v |> List.flatten
+and v_block v = v_list v_block_stat v |> List_.flatten
 
 and v_block_stat x : G.item list =
   match x with
@@ -795,7 +811,7 @@ and v_block_stat x : G.item list =
       let ipak, ids = v_package v1 in
       let xxs = v_list v_top_stat v2 in
       [ G.DirectiveStmt (G.Package (ipak, ids) |> G.d) |> G.s ]
-      @ List.flatten xxs
+      @ List_.flatten xxs
       @ [ G.DirectiveStmt (G.PackageEnd rb |> G.d) |> G.s ]
 
 and v_top_stat v = v_block_stat v
@@ -830,7 +846,7 @@ and v_modifier_kind = function
 
 and v_annotation (v1, v2, v3) : G.attribute =
   let v1 = v_tok v1 and v2 = v_type_ v2 and v3 = v_list v_arguments v3 in
-  let args = v3 |> List_.map Tok.unbracket |> List.flatten in
+  let args = v3 |> List_.map Tok.unbracket |> List_.flatten in
   match v2.t with
   | TyN name -> G.NamedAttr (v1, name, fb args)
   | _ ->
@@ -870,10 +886,8 @@ and v_variance = function
   | Covariant -> G.Covariant
   | Contravariant -> G.Contravariant
 
-and v_type_parameters v : G.type_parameter list =
-  match v with
-  | None -> []
-  | Some (_lb, xs, _rb) -> v_list v_type_parameter xs
+and v_type_parameters v : G.type_parameters option =
+  v_option (v_bracket (v_list v_type_parameter)) v
 
 and v_definition x : G.definition list =
   match x with
@@ -897,14 +911,14 @@ and v_given_definition { gsig; gkind } =
           | Some id -> [ G.I (v_ident id) ]
         in
         let g_tparams =
-          [
-            G.Anys (v_type_parameters g_tparams |> List_.map (fun x -> G.Tp x));
-          ]
+          match v_type_parameters g_tparams with
+          | None -> []
+          | Some (_, xs, _) -> [ G.Anys (xs |> List_.map (fun x -> G.Tp x)) ]
         in
         let g_using =
           [
             G.Anys
-              (v_list v_bindings g_using |> List.concat
+              (v_list v_bindings g_using |> List_.flatten
               |> List_.map (fun x -> G.Pa x));
           ]
         in
@@ -941,7 +955,7 @@ and v_given_definition { gsig; gkind } =
   in
   let todo_kind = ("given", Tok.unsafe_fake_tok "given") in
   [
-    ( { name = G.OtherEntity (todo_kind, []); attrs = []; tparams = [] },
+    ( { name = G.OtherEntity (todo_kind, []); attrs = []; tparams = None },
       G.OtherDef (todo_kind, v1 @ [ G.Anys v2 ]) );
   ]
 
@@ -951,7 +965,9 @@ and v_end_marker { end_tok; end_kind } : G.stmt =
 and v_extension { ext_tok = _; ext_tparams; ext_using; ext_param; ext_methods }
     : G.stmt list =
   let tparams =
-    G.Anys (v_type_parameters ext_tparams |> List_.map (fun tp -> G.Tp tp))
+    match v_type_parameters ext_tparams with
+    | None -> G.Anys []
+    | Some (_, xs, _) -> G.Anys (xs |> List_.map (fun tp -> G.Tp tp))
   in
   let using =
     G.Anys
@@ -982,7 +998,7 @@ and v_enum_case_definition attrs v1 =
   | EnumConstr { eid; etyparams; eparams; eattrs; eextends } ->
       let id = v_ident eid in
       let tparams = v_type_parameters etyparams in
-      let params = v_list v_bindings eparams |> List.concat in
+      let params = v_list v_bindings eparams |> List_.flatten in
       let attrs = v_list v_attribute eattrs @ attrs in
       (* TODO *)
       let _extends = v_list v_constr_app eextends in
@@ -1002,7 +1018,7 @@ and v_enum_case_definition attrs v1 =
         | args -> Some (fb args)
       in
       [
-        ( G.basic_entity ~attrs ~tparams id,
+        ( G.basic_entity ~attrs ?tparams id,
           G.EnumEntryDef { ee_args = args; ee_body = None } );
       ]
 
@@ -1017,19 +1033,19 @@ and v_variable_definitions
   let topt = v_option v_type_ v_vtype in
   let eopt = v_option v_expr v_vbody in
   v_vpatterns
-  |> List_.map_filter (fun pat ->
+  |> List_.filter_map (fun pat ->
          match pat with
          | PatVarid id
          | PatName (Id id, []) ->
              let ent = G.basic_entity id ~attrs in
-             let vdef = { G.vinit = eopt; vtype = topt } in
+             let vdef = { G.vinit = eopt; vtype = topt; vtok = G.no_sc } in
              Some (ent, G.VarDef vdef)
          | _ ->
              (* TODO: some patterns may have tparams? *)
              let ent =
-               { G.name = EPattern (v_pattern pat); attrs; tparams = [] }
+               { G.name = EPattern (v_pattern pat); attrs; tparams = None }
              in
-             let vdef = { G.vinit = eopt; vtype = topt } in
+             let vdef = { G.vinit = eopt; vtype = topt; vtok = G.no_sc } in
              Some (ent, G.VarDef vdef))
 
 and v_entity { name = v_name; attrs = v_attrs; tparams = v_tparams } =
@@ -1062,7 +1078,7 @@ and v_function_definition
   let fbody = v_option v_fbody vfbody in
   {
     fkind = kind;
-    fparams = fb (List.flatten params);
+    fparams = fb (List_.flatten params);
     (* TODO? *)
     frettype = tret;
     fbody =
@@ -1145,7 +1161,7 @@ and v_template_definition
     } : G.class_definition =
   let ckind = v_wrap v_template_kind v_ckind in
   (* TODO? flatten? *)
-  let cparams = fb (v_list v_bindings v_cparams |> List.flatten) in
+  let cparams = fb (v_list v_bindings v_cparams |> List_.flatten) in
   let cextends, cmixins = v_template_parents v_cparents in
   let body = v_option v_template_body v_cbody in
   let cbody =
@@ -1207,7 +1223,7 @@ and v_type_definition_kind = function
       (* abstract type with constraints? *)
       G.AbstractType (fake "")
 
-let v_program v = v_list v_top_stat v |> List.flatten
+let v_program v = v_list v_top_stat v |> List_.flatten
 
 let v_any = function
   | Pr v1 ->

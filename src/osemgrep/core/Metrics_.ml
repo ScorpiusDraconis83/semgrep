@@ -6,7 +6,7 @@ module OutJ = Semgrep_output_v1_j
 (*****************************************************************************)
 (*
    Small wrapper around semgrep-interfaces/semgrep_metrics.atd to prepare
-   semgrep metrics data to send to https://metrics.semgrep.dev
+   the metrics data to send to https://metrics.semgrep.dev
 
    Partially translated from metrics.py
 
@@ -18,47 +18,65 @@ module OutJ = Semgrep_output_v1_j
      - basic feature tags (subcommands, language)
      - user agent information (version, subcommand)
      - language information (language, numRules, numTargets, totalBytesScanned)
-
    TODO:
     - add_registry_url
     - parsing stat (parse rates)
-    - rule profiling stats
+    - rule profiling stats (including ruleStats)
     - cli-envvar? cli-prompt?
     - more?
 
     Sending the metrics is handled from the main CLI entrypoint following the
     execution of the CLI.safe_run() function to report the exit code.
 
-    Metrics Flow:
-      1. init() - set started_at, event_id, anonymous_user_id
-      2. add_feature - tag subcommand, CLI flags, language, etc.
-      3. add_user_agent_tag - add CLI version, subcommand, etc.
-      4. add_* methods - any other data, or access directly g.payload
-      5. prepare_to_send() - set sent_at
-      6. string_of_metrics() - serialize metrics payload as JSON string
-      7. send_metrics() - send payload to our endpoint
+    Metrics flow in osemgrep:
+      1. init() (in CLI.ml) - set started_at, event_id, anonymous_user_id
+      2. configure() (in the Xxx_subcommand.ml) to enable/disable metrics
+      3. add_feature - tag subcommand, CLI flags, language, etc.
+      4. add_user_agent_tag - add CLI version, subcommand, etc.
+      5. add_* methods - any other data, or access directly g.payload
+      6. prepare_to_send() - set sent_at
+      7. string_of_metrics() - serialize metrics payload as JSON string
+      8. send_metrics() (in CLI.ml) - send payload to our endpoint
          https://metrics.semgrep.dev (can be changed via SEMGREP_METRICS_URL
          for testing purpose)
 
-    "Life of a Metric Payload" after sending:
+    Metrics flow outside (o)semgrep: See
+    https://www.notion.so/semgrep/Life-of-a-Semgrep-CLI-metrics-payload-8b6442c4ce164819aa55bab08d83c1f6
+    but basically after posting to metrics.semgrep.dev:
       -> API Gateway (Name=Telemetry)
       -> Lambda (Name=SemgrepMetricsGatewayToKinesisIntegration)
+         see semgrep-app-lambdas/metrics-handler/prod/index.js
       -> Kinesis Stream (Name=semgrep-cli-telemetry)
         |-> S3 Bucket (Name=semgrep-cli-metrics)
           -> Snowflake (SEMGREP_CLI_TELEMETRY)
             -> Metabase (SEMGREP CLI - SNOWFLAKE)
-        |-> OpenSearch (Name=semgrep-metrics)
+        |-> OpenSearch (Name=semgrep-metrics) (TODO: where??)
 
     For metabase, you can watch "Metabase for PA engineers" talk by Emma here:
     https://drive.google.com/file/d/1BJNR578M3KxbuuIU5xNPFkhbYccfo9XH/view
+    You can see the data here:
+    https://metabase.corp.semgrep.dev/browse/databases/6-semgrep-cli-snowflake
+    and especially the CLI Run table and inside the EVENT column which contains
+    the whole JSON payload.
+    However it does not seem to work very well.
+
+    For Snowflake, which seems more responsive and with less errors, try
+    https://app.snowflake.com/fbwpxcx/xx83553/#/data/databases/SEMGREP_CLI
+    and in https://app.snowflake.com/fbwpxcx/xx83553/worksheets click '+' to
+    write query, such as
+
+       SELECT *
+       FROM "SEMGREP_CLI"."PUBLIC"."CLI_RUN"
+       WHERE date_trunc('day', CAST(INGESTED_AT AS TIMESTAMP)) >=
+             date_trunc('day', current_timestamp - INTERVAL '90 days')
+          AND USER_AGENT LIKE '%logout%'
 
     Notes:
-      - Raw payload is ingested by our metrics endpoint exposed via our API
-        Gateway
-      - We parse the payload and add additional metadata (i.e. sender ip
-        address) in our Lambda function
-        TODO: how do we parse the payload? in a typed way? reuse
-        semgrep_metrics.atd?
+      - We parse the payload and add additional metadata (i.e., sender IP, the
+        user Agent) in our Lambda function
+        (see semgrep-app-lambdas/metrics-handler/prod/index.js).
+        We do not parse the payload in a typed way, we access JSON fields
+        directly (bad)
       - We pass the transformed payload to our AWS Kinesis stream
         ("semgrep-cli-telemetry")
       - The payload can be viewed in our internal AWS console (if you can
@@ -75,21 +93,19 @@ module OutJ = Semgrep_output_v1_j
       - The data viewer URL will look something like https://us-west-2.console.aws.amazon.com/kinesis/home?region=us-west-2#/streams/details/semgrep-cli-telemetry/dataViewer
         where each row is a payload with the IP address as the Partition Key
       - The data is then stored in our S3 bucket ("semgrep-cli-metrics") and
-        can be queried via Snowflake or Metabase
+        can be queried via Snowflake or Metabase such as
+        https://metabase.corp.semgrep.dev/browse/databases/6-semgrep-cli-snowflake
+        https://app.snowflake.com/fbwpxcx/xx83553/#/data/databases/SEMGREP_CLI
 
-    This file should be called simply Metrics.ml but this would conflict with
-    a module using the same name in one of the OCaml library we use.
+    alt: this file should be called simply Metrics.ml but this would conflict
+    with a module using the same name in one of the OCaml library we use.
 *)
 
 (*****************************************************************************)
 (* Types and constants *)
 (*****************************************************************************)
 
-(* TODO: set to the cannonical "https://metrics.semgrep.dev" once we upgrade
- * the host from TLS 1.2 to TLS 1.3
- *)
-let metrics_url =
-  Uri.of_string "https://oeyc6oyp4f.execute-api.us-west-2.amazonaws.com/Prod/"
+let metrics_url : Uri.t = Uri.of_string "https://metrics.semgrep.dev"
 
 (*
      Configures metrics upload.
@@ -125,17 +141,20 @@ type t = {
   mutable payload : Semgrep_metrics_t.payload;
 }
 
-let now () : Unix.tm = Unix.gmtime (Unix.gettimeofday ())
+let now () : Timedesc.Timestamp.t = Timedesc.Timestamp.now ()
 
 let default_payload =
+  let rand = Stdlib.Random.State.make_self_init () in
   {
-    Semgrep_metrics_t.event_id = Uuidm.v `V4;
+    Semgrep_metrics_t.event_id = Uuidm.v4_gen rand ();
     anonymous_user_id = "";
     started_at = now ();
     sent_at = now ();
     environment =
       {
         version = Version.version;
+        os = Sys.os_type;
+        isTranspiledJS = false;
         projectHash = None;
         configNamesHash = Digestif.SHA256.digest_string "<noconfigyet>";
         rulesHash = None;
@@ -143,6 +162,7 @@ let default_payload =
         isDiffScan = false;
         isAuthenticated = false;
         integrationName = None;
+        deployment_id = None;
       };
     performance =
       {
@@ -150,7 +170,10 @@ let default_payload =
         numTargets = None;
         totalBytesScanned = None;
         fileStats = None;
-        ruleStats = None;
+        (* ugly: this should be None, but some code in the semgrep-app-lambdas
+         * repo in metrics-handler/prod/index.js assumes a Some here.
+         *)
+        ruleStats = Some [];
         profilingTimes = None;
         maxMemoryBytes = None;
       };
@@ -158,8 +181,12 @@ let default_payload =
     value =
       {
         features = [];
+        (* TODO: proFeatures *)
         proFeatures = None;
+        (* TODO: numFindings *)
         numFindings = None;
+        (* TODO: numFindingsByProduct *)
+        numFindingsByProduct = None;
         numIgnored = None;
         ruleHashesWithFindings = None;
         engineRequested = "OSS";
@@ -174,6 +201,8 @@ let default_payload =
         sessionId = None;
         version = None;
         ty = None;
+        autofixCount = None;
+        ignoreCount = None;
       };
   }
 
@@ -230,9 +259,17 @@ let is_enabled () =
 (* User agent *)
 (*****************************************************************************)
 
+(* The user_agent is not part of the payload we send to the metrics
+ * endpoint, but it's part of the HTTP request and an AWS Lambda in the metrics
+ * pipeline actually adds it back to the payload.
+ *
+ * This function is used to add extra "tags" to the agent around
+ * parenthesis (e.g., "(Docker)", "(osemgrep)", "(command/login)")
+ *)
 let add_user_agent_tag (str : string) =
   let str =
     str
+    (* TODO: don't use JaneStreet Base until we agree to do so *)
     |> Base.String.chop_prefix_if_exists ~prefix:"("
     |> Base.String.chop_suffix_if_exists ~suffix:")"
     |> String.trim |> spf "(%s)"
@@ -248,9 +285,9 @@ let string_of_user_agent () = String.concat " " g.user_agent
 (* we pass an anonymous_user_id here to avoid a dependency cycle with
  * ../configuring/Semgrep_settings.ml
  *)
-let init ~anonymous_user_id ~ci =
+let init (caps : < Cap.random ; .. >) ~anonymous_user_id ~ci =
   g.payload.started_at <- now ();
-  g.payload.event_id <- Uuidm.v4_gen (Random.get_state ()) ();
+  g.payload.event_id <- Uuidm.v4_gen (CapRandom.get_state caps#random ()) ();
   g.payload.anonymous_user_id <- Uuidm.to_string anonymous_user_id;
   (* TODO: this field in semgrep_metrics.atd should be a boolean *)
   if ci then g.payload.environment.ci <- Some "true"
@@ -279,6 +316,7 @@ let add_engine_type (engine_type : Engine_type.t) =
           secrets_config;
           code_config;
           supply_chain_config;
+          _;
         } ->
         {
           analysis_type =
@@ -296,7 +334,7 @@ let add_engine_type (engine_type : Engine_type.t) =
                    Semgrep_metrics_t.secrets_config ->
                 {
                   permitted_origins =
-                    (if conf.allow_all_origins then `Any else `Semgrep);
+                    (if conf.allow_all_origins then `Any else `NoCommunity);
                 })
               secrets_config;
           supply_chain_config =
@@ -353,12 +391,16 @@ let add_rules_hashes_and_rules_profiling ?profiling:_TODO rules =
   g.payload.environment.rulesHash <- Some (Digestif.SHA256.get rulesHash_value);
   g.payload.performance.numRules <- Some (List.length rules);
   (* TODO: Properly populate g.payload.performance.ruleStats.
+   *
    * Currently, when we have thousands of rules, they will bloat the
    * metrics payload. Right now in metrics.py, we are only populating
    * these stats when both matching time and bytes scanned are greater
    * than 0.
+   *
+   * ugly: see the comment above on ruleStats in default_payload why we set this
+   * to Some [] instead of None.
    *)
-  g.payload.performance.ruleStats <- None
+  g.payload.performance.ruleStats <- Some []
 
 let add_max_memory_bytes (profiling_data : Core_profiling.t option) =
   Option.iter
@@ -376,7 +418,7 @@ let add_rules_hashes_and_findings_count (filtered_matches : (Rule.t * int) list)
    *)
   let ruleHashesWithFindings_value =
     filtered_matches
-    |> List_.map_filter (fun (rule, rule_matches) ->
+    |> List_.filter_map (fun (rule, rule_matches) ->
            if rule_matches > 0 then
              Some
                (Digestif.SHA256.to_hex (Rule.sha256_of_rule rule), rule_matches)
@@ -387,10 +429,10 @@ let add_rules_hashes_and_findings_count (filtered_matches : (Rule.t * int) list)
 let add_targets_stats (targets : Fpath.t Set_.t)
     (prof_opt : Core_profiling.t option) =
   let targets = Set_.elements targets in
-  let (hprof : (Fpath.t, Core_profiling.file_profiling) Hashtbl.t) =
+  let hprof : (Fpath.t, Core_profiling.file_profiling) Hashtbl.t =
     match prof_opt with
     | None -> Hashtbl.create 0
-    | Some prof ->
+    | Some (prof : Core_profiling.t) ->
         prof.file_times
         |> List_.map (fun ({ Core_profiling.file; _ } as file_prof) ->
                (file, file_prof))
@@ -402,15 +444,15 @@ let add_targets_stats (targets : Fpath.t Set_.t)
     |> List_.map (fun path ->
            let runTime, parseTime, matchTime =
              match Hashtbl.find_opt hprof path with
-             | Some fprof ->
+             | Some (fprof : Core_profiling.file_profiling) ->
                  ( Some fprof.run_time,
                    Some
                      (fprof.rule_times
-                     |> List_.map (fun rt -> rt.Core_profiling.parse_time)
+                     |> List_.map (fun rt -> rt.Core_profiling.rule_parse_time)
                      |> Common2.sum_float),
                    Some
                      (fprof.rule_times
-                     |> List_.map (fun rt -> rt.Core_profiling.match_time)
+                     |> List_.map (fun rt -> rt.Core_profiling.rule_match_time)
                      |> Common2.sum_float) )
              | None -> (None, None, None)
            in
@@ -448,6 +490,10 @@ let add_exit_code code =
   let code = Exit_code.to_int code in
   g.payload.errors.returnCode <- Some code
 
+(* Covered: "language/xxx", "cli-flag/xxx", "subcommand/xxx"
+ * TOPORT: "config/xxx", "ruleset/xxx", "cli-envvar/xxx", "cli-prompt/xxx"
+ *  "output/xxx"
+ *)
 let add_feature ~category ~name =
   let str = Format.asprintf "%s/%s" category name in
   g.payload.value.features <- str :: g.payload.value.features

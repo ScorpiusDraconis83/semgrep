@@ -3,4 +3,4 @@
  * run via Alcotest.run.
  *)
 val tests :
-  (string (* filename *) -> AST_generic.program) -> Alcotest_ext.test list
+  < Cap.time_limit > -> (Fpath.t -> AST_generic.program) -> Testo.t list

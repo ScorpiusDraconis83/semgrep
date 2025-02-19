@@ -11,11 +11,16 @@
       id: 'setup-docker-tag',
       run: |||
         echo "Github event is ${{ github.event_name }}"
+        if [ "${{ github.repository }}" = "semgrep/semgrep-proprietary" ]; then
+          PRO_PREFIX="pro-"
+        else
+          PRO_PREFIX=""
+        fi
         if [ "${{ github.event_name }}" = "pull_request" ]; then
-          echo "docker-tag=pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          echo "docker-tag=${PRO_PREFIX}pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
           echo "Setting docker tag to current pull request number"
         else
-          echo "docker-tag=develop" >> "$GITHUB_OUTPUT"
+          echo "docker-tag=${PRO_PREFIX}develop" >> "$GITHUB_OUTPUT"
           echo "Setting dry-run to develop"
         fi
       |||,
@@ -29,7 +34,7 @@
     },
     steps: [
       {
-        uses: 'actions/checkout@v3',
+        uses: 'actions/checkout@v4',
       },
       {
         id: 'get-sha',
@@ -51,7 +56,7 @@
   },
   // workflow_inputs is a JSON object that looks like [{ "name": "name_1", "value": "value_1" }, ...]
   // "value_1" should be a string that can include GHA expression for the value, e.g.,
-  // "returntocorp/semgrep:${{ needs.setup-docker-tag.outputs.docker-tag }}".
+  // "semgrep/semgrep:${{ needs.setup-docker-tag.outputs.docker-tag }}".
   // This will be converted into env vars to avoid accidental script injections
   // and reconstructed as the JSON body in the POST request to Argo.
   trigger_argo_workflow: function(trigger_url, workflow_inputs) {

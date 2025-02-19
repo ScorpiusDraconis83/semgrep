@@ -9,7 +9,7 @@ open Cmdliner
 *)
 
 (*************************************************************************)
-(* Types *)
+(* Types and constants *)
 (*************************************************************************)
 
 type conf = {
@@ -21,6 +21,10 @@ type conf = {
   maturity : Maturity.t;
 }
 [@@deriving show]
+
+let blurb_pro =
+  "Requires Semgrep Pro Engine. See https://semgrep.dev/products/pro-engine/ \
+   for more."
 
 (*************************************************************************)
 (* Verbosity options (mutually exclusive) *)
@@ -57,26 +61,21 @@ let o_debug : bool Term.t =
 let o_logging : Logs.level option Term.t =
   let combine debug quiet verbose =
     match (verbose, debug, quiet) with
-    | false, false, false -> Some Logs.Warning
-    | true, false, false -> Some Logs.Info
-    | false, true, false -> Some Logs.Debug
-    | false, false, true -> None
-    | _else_ ->
+    | false, false, false -> (* default *) Some Logs.Warning
+    | true, false, false -> (* --verbose *) Some Logs.Info
+    | false, true, false -> (* --debug *) Some Logs.Debug
+    | false, false, true -> (* --quiet *) None
+    | _ ->
         (* TOPORT: list the possibilities *)
         Error.abort "mutually exclusive options --quiet/--verbose/--debug"
   in
   Term.(const combine $ o_debug $ o_quiet $ o_verbose)
 
-(* ugly: also partially done in CLI.ml *)
 let setup_logging ~force_color ~level =
-  (* For osemgrep we use the Logs library instead of the Logger
-   * library in pfff. We had a few issues with Logger (which is a small
-   * wrapper around the easy_logging library), and we don't really want
-   * the logging in semgrep-core to interfere with the proper
-   * logging/output we want in osemgrep, so this is a good opportunity
-   * to evaluate a new logging library.
-   *)
-  Logs_.setup_logging ~force_color ~level ();
+  Log_semgrep.setup ~force_color ~level ();
+  Logs.debug (fun m ->
+      m "Logging setup for osemgrep: force_color=%B level=%s" force_color
+        (Logs.level_to_string level));
   (* TOPORT
         # Setup file logging
         # env.user_log_file dir must exist
@@ -89,23 +88,8 @@ let setup_logging ~force_color ~level =
         file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
   *)
-  Logs.debug (fun m -> m "Logging setup for osemgrep");
   Logs.debug (fun m ->
-      m "Executed as: %s" (Sys.argv |> Array.to_list |> String.concat " "));
-
-  (* Easy_logging setup. We should avoid to use Logger in osemgrep/
-   * and use Logs instead, but it is still useful to get the semgrep-core
-   * logging information at runtime, hence this call.
-   *)
-  let debug =
-    match level with
-    | Some Logs.Debug -> true
-    | _else_ -> false
-  in
-  Logging_.setup ~debug
-    ~log_config_file:(Fpath.v "log_config.json")
-    ~log_to_file:None;
-  ()
+      m "Executed as: %s" (Sys.argv |> Array.to_list |> String.concat " "))
 
 (*************************************************************************)
 (* Profiling options *)
@@ -137,7 +121,7 @@ let help_page_bottom =
     `S Manpage.s_bugs;
     `P
       "If you encounter an issue, please report it at\n\
-      \      https://github.com/returntocorp/semgrep/issues";
+      \      https://github.com/semgrep/semgrep/issues";
   ]
 
 (* Small wrapper around Cmdliner.Cmd.eval_value.
@@ -150,7 +134,7 @@ let eval_value ~argv cmd =
    *)
   match Cmd.eval_value ~catch:false ~argv cmd with
   (* alt: could define a new Exit_code for those kinds of errors *)
-  | Error (`Term | `Parse) -> Error.exit Exit_code.fatal
+  | Error (`Term | `Parse) -> Error.exit_code_exn (Exit_code.fatal ~__LOC__)
   (* this should never happen, because of the ~catch:false above *)
   | Error `Exn -> assert false
   | Ok ok -> (
@@ -158,4 +142,4 @@ let eval_value ~argv cmd =
       | `Ok config -> config
       | `Version
       | `Help ->
-          Error.exit Exit_code.ok)
+          Error.exit_code_exn (Exit_code.ok ~__LOC__))

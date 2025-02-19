@@ -25,8 +25,8 @@ open Common
  * Semgrep (especially in the ocamllex/menhir-based parsers).
  *
  * Note that those exns can be converted in Semgrep_error_code.error with
- * Semgrep_error_code.try_with_exn_to_error()
- * coupling: Semgrep_error_code.exn_to_error()
+ * Core_error.exn_to_error()
+ * coupling: Core_error.exn_to_error()
  *
  * related code:
  *  - Semgrep_output_v1.core_error_kind
@@ -56,10 +56,10 @@ exception Other_error of string * Tok.t
 (*****************************************************************************)
 
 (* val lexical_error : string -> Lexing.lexbuf -> unit *)
-let lexical_error s lexbuf =
+let lexical_error msg lexbuf =
   let info = Tok.tok_of_lexbuf lexbuf in
-  if !Flag_parsing.exn_when_lexical_error then raise (Lexical_error (s, info))
-  else if !Flag_parsing.verbose_lexing then UCommon.pr2_once ("LEXER: " ^ s)
+  if !Flag_parsing.exn_when_lexical_error then raise (Lexical_error (msg, info))
+  else if !Flag_parsing.verbose_lexing then UCommon.pr2_once ("LEXER: " ^ msg)
   else ()
 
 (****************************************************************************)

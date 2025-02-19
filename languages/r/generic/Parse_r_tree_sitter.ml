@@ -12,6 +12,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
  * LICENSE for more details.
  *)
+open Fpath_.Operators
 module CST = Tree_sitter_r.CST
 module H = Parse_tree_sitter_helpers
 open AST_generic
@@ -135,7 +136,7 @@ let rec map_argument (env : env) (x : CST.argument) : G.argument =
 
 and map_arguments (env : env) (xs : CST.arguments) : G.argument list =
   (* TODO ,, has a meaning? *)
-  List_.map_filter
+  List_.filter_map
     (fun x ->
       match x with
       | `Arg x -> Some (map_argument env x)
@@ -469,7 +470,7 @@ and map_formal_parameter (env : env) (x : CST.formal_parameter) : G.parameter =
       let id = map_identifier env v1 in
       let _teq = (* "=" *) token env v2 in
       let e = map_expression env v3 in
-      G.Param (G.param_of_id id ~pdefault:(Some e))
+      G.Param (G.param_of_id id ~pdefault:e)
   | `Dots tok ->
       (* not semgrep-ext: either, part of the original language *)
       let t = (* "..." *) token env tok in
@@ -543,7 +544,7 @@ and map_pipe_rhs_argument (env : env) (x : CST.pipe_rhs_argument) : G.argument =
 
 and map_pipe_rhs_arguments (env : env) (xs : CST.pipe_rhs_arguments) :
     G.argument list =
-  List_.map_filter
+  List_.filter_map
     (fun x ->
       match x with
       | `Pipe_rhs_arg x -> Some (map_pipe_rhs_argument env x)
@@ -591,15 +592,15 @@ and map_unary (env : env) (x : CST.unary) : G.expr =
 (*****************************************************************************)
 let parse file =
   H.wrap_parser
-    (fun () -> Tree_sitter_r.Parse.file file)
-    (fun cst ->
+    (fun () -> Tree_sitter_r.Parse.file !!file)
+    (fun cst _extras ->
       let env = { H.file; conv = H.line_col_to_pos file; extra = () } in
       map_program env cst)
 
 let parse_pattern str =
   H.wrap_parser
     (fun () -> Tree_sitter_r.Parse.string str)
-    (fun cst ->
-      let file = "<pattern>" in
-      let env = { H.file; conv = Hashtbl.create 0; extra = () } in
+    (fun cst _extras ->
+      let file = Fpath.v "<pattern>" in
+      let env = { H.file; conv = H.line_col_to_pos_pattern str; extra = () } in
       G.Ss (map_program env cst))

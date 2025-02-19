@@ -6,8 +6,8 @@ let convert_pos ~file (loc : Aliengrep.Match.loc) =
   (* single "token" spanning the whole match *)
   let bytepos = loc.start in
   let line, column = Xpattern_matcher.line_col_of_charpos file bytepos in
-  let pos = Pos.make ~file ~line ~column bytepos in
-  { Tok.str = loc.substring; pos }
+  let pos = Pos.make file ~line ~column bytepos in
+  { Loc.str = loc.substring; pos }
 
 let convert_loc ~file (loc : Aliengrep.Match.loc) =
   (* single "token" spanning the whole match *)
@@ -17,8 +17,8 @@ let convert_loc ~file (loc : Aliengrep.Match.loc) =
   let end_pos =
     let bytepos = loc.start + loc.length in
     let line, column = Xpattern_matcher.line_col_of_charpos file bytepos in
-    let pos = Pos.make ~file ~line ~column bytepos in
-    { Tok.str = ""; pos }
+    let pos = Pos.make file ~line ~column bytepos in
+    { Loc.str = ""; pos }
   in
   (start_pos, end_pos)
 
@@ -27,12 +27,8 @@ let convert_capture ~file
   let str = loc.substring in
   let pos = convert_pos ~file loc in
   let tok = Tok.tok_of_loc pos in
-  let name_with_dollar =
-    match mv with
-    | Metavariable, name -> "$" ^ name
-    | Metavariable_ellipsis, name -> "$..." ^ name
-  in
-  (name_with_dollar, Metavariable.Text (str, tok, tok))
+  let name_with_dollar = Aliengrep.Pat_compile.string_of_metavariable mv in
+  (name_with_dollar, Xpattern_matcher.mval_of_string str tok)
 
 (* Convert locations to the file/line/column format etc. *)
 let convert_match ~file (match_ : Aliengrep.Match.match_) =
@@ -43,7 +39,7 @@ let convert_match ~file (match_ : Aliengrep.Match.match_) =
 let aliengrep_matcher target_str file pat =
   Aliengrep.Match.search pat target_str |> List_.map (convert_match ~file)
 
-let matches_of_aliengrep patterns lazy_contents (file : string) =
+let matches_of_aliengrep patterns lazy_contents (file : Fpath.t) origin =
   let init _ =
     (* TODO: ignore binary files like spacegrep? *)
     (* TODO: preprocess and remove comments like spacegrep does *)
@@ -51,4 +47,4 @@ let matches_of_aliengrep patterns lazy_contents (file : string) =
   in
   Xpattern_matcher.matches_of_matcher patterns
     { init; matcher = aliengrep_matcher }
-    (Fpath.v file)
+    file origin

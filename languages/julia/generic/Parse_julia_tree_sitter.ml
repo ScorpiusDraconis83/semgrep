@@ -14,6 +14,7 @@
  *)
 open Common
 open Either_
+open Fpath_.Operators
 module CST = Tree_sitter_julia.CST
 module H = Parse_tree_sitter_helpers
 module G = AST_generic
@@ -48,7 +49,7 @@ let in_pattern env =
 (* In Jane Street Core, this exists as Option.all, reeee
  *)
 let option_all xs =
-  List.fold_right
+  List_.fold_right
     (fun x acc ->
       match (x, acc) with
       | _, None -> None
@@ -70,7 +71,8 @@ let map_trailing_comma env v =
 
 let map_word_identifier (env : env) (tok : CST.word_identifier) = str env tok
 
-let map_pat_aa33ccb (env : env) (tok : CST.pat_aa33ccb) =
+let map_semgrep_extended_metavariable (env : env)
+    (tok : CST.semgrep_extended_metavariable) =
   (* pattern \$[A-Z][a-zA-Z0-9]* *)
   str env tok
 
@@ -78,7 +80,7 @@ let map_identifier (env : env) (x : CST.identifier) =
   let s, t =
     match x with
     | `Word_id tok -> map_word_identifier env tok
-    | `Pat_aa33ccb x -> map_pat_aa33ccb env x
+    | `Semg_exte_meta x -> map_semgrep_extended_metavariable env x
   in
   (s, t)
 
@@ -357,24 +359,21 @@ and map_multi_assign ?(attrs = []) (env : env) x =
   | `Assign x ->
       let l_exp, _, r_exp = map_assignment env x in
       DefStmt
-        ( { name = EDynamic l_exp; attrs; tparams = [] },
-          VarDef { vinit = Some r_exp; vtype = None } )
+        ( { name = EDynamic l_exp; attrs; tparams = None },
+          VarDef { vinit = Some r_exp; vtype = None; vtok = G.no_sc } )
       |> G.s
   | `Id tok ->
       let id = map_identifier env tok in
-      DefStmt (basic_entity ~attrs id, VarDef { vinit = None; vtype = None })
-      |> G.s
+      DefStmt (basic_entity ~attrs id, VarDef G.empty_var) |> G.s
   | `Typed_exp x ->
       let l_exp, _, ty = map_typed_expression env x in
       DefStmt
-        ( { name = EDynamic l_exp; attrs; tparams = [] },
-          VarDef { vinit = None; vtype = Some ty } )
+        ( { name = EDynamic l_exp; attrs; tparams = None },
+          VarDef { vinit = None; vtype = Some ty; vtok = G.no_sc } )
       |> G.s
   | `Bare_tuple x ->
       let e = map_bare_tuple_exp env x in
-      DefStmt
-        ( { name = EDynamic e; attrs; tparams = [] },
-          VarDef { vinit = None; vtype = None } )
+      DefStmt ({ name = EDynamic e; attrs; tparams = None }, VarDef G.empty_var)
       |> G.s
   | `Func_defi x -> map_function_definition env x
   | `Short_func_defi x -> map_short_function_definition env x
@@ -515,12 +514,12 @@ and map_anon_choice_id_00cc266 (env : env) (x : CST.anon_choice_id_00cc266) =
   | `Id tok -> Left (map_identifier env tok)
   | `Interp_exp x -> map_interpolation_expression_either env x
 
-and map_anon_choice_id_00cc266_ent ?(attrs = []) ?(tparams = []) (env : env)
+and map_anon_choice_id_00cc266_ent ?(attrs = []) ?tparams (env : env)
     (x : CST.anon_choice_id_00cc266) =
   match x with
   | `Id tok ->
       let id = map_identifier env tok in
-      basic_entity ~attrs ~tparams id
+      basic_entity ~attrs ?tparams id
   | `Interp_exp x -> (
       match map_interpolation_expression_either env x with
       | Left id -> { name = EN (H2.name_of_id id); attrs; tparams }
@@ -596,15 +595,16 @@ and map_anon_choice_id_c313bb1 (env : env) (x : CST.anon_choice_id_c313bb1) =
   | `Id tok ->
       let id = map_identifier env tok in
       let ent = basic_entity id in
-      DefStmt (ent, VarDef { vinit = None; vtype = None }) |> G.s
+      DefStmt (ent, VarDef G.empty_var) |> G.s
   | `Named_field x ->
       let either, _tok, exp = map_named_field env x in
       let ent =
         match either with
         | Left id -> basic_entity id
-        | Right e -> { name = EDynamic e; attrs = []; tparams = [] }
+        | Right e -> { name = EDynamic e; attrs = []; tparams = None }
       in
-      DefStmt (ent, VarDef { vinit = Some exp; vtype = None }) |> G.s
+      DefStmt (ent, VarDef { vinit = Some exp; vtype = None; vtok = G.no_sc })
+      |> G.s
 
 and map_anon_choice_id_f1f5a37 (env : env) (x : CST.anon_choice_id_f1f5a37) =
   match x with
@@ -655,7 +655,7 @@ and map_scoped_identifier_exp (env : env) ((v1, v2, v3) : CST.scoped_identifier)
   (* given xn xn-1 ... x2
      we do a right fold starting with x1, adding everything to the end
   *)
-  List.fold_right
+  List_.fold_right
     (fun (tok, field) acc ->
       match field with
       | Left id -> DotAccess (acc, tok, FN (H2.name_of_id id)) |> G.e
@@ -692,11 +692,11 @@ and map_import_subject (env : env) (x : CST.anon_choice_impo_a542259) =
   | `Impo x -> (
       (* We cannot import as a scoped identifier. *)
       match map_importable env x with
-      | Some [ id ] -> Some (id, None)
+      | Some [ id ] -> Some (H2.mk_import_from_kind id None)
       | __else__ -> None)
   | `Import_alias x -> (
       match map_import_alias env x with
-      | Some ([ id ], alias) -> Some (id, Some alias)
+      | Some ([ id ], alias) -> Some (H2.mk_import_from_kind id (Some alias))
       | _ -> None)
 
 and map_anon_choice_impo_a542259 (env : env) (x : CST.anon_choice_impo_a542259)
@@ -1007,7 +1007,7 @@ and map_catch_clause (env : env) ((v1, v2, v3, v4) : CST.catch_clause) : catch =
         let id = map_identifier env tok in
         CatchPattern (PatId (id, empty_id_info ()))
     | Some (`Semg_ellips tok) -> CatchPattern (PatEllipsis (token env tok))
-    | None -> CatchPattern (PatUnderscore (fake "underscore"))
+    | None -> CatchPattern (PatWildcard (fake "underscore"))
   in
   let _v3 = map_terminator_opt env v3 in
   let v4 = map_source_file_stmt env v4 in
@@ -1020,7 +1020,7 @@ and map_closed_macrocall_expression (env : env)
     match v3 with
     | `Imme_brace_curl_exp (v1, v2) ->
         let _v1 = (* immediate_brace *) token env v1 in
-        let v2 = map_type_parameter_list env v2 in
+        let _, v2, _ = map_type_parameter_list env v2 in
         v2
         |> List_.map (fun arg ->
                OtherArg (("TyParam", G.fake "TyParam"), [ G.Tp arg ]))
@@ -1057,7 +1057,7 @@ and map_closed_macrocall_expression (env : env)
 
 and map_comprehension_clause (env : env)
     ((v1, v2, v3, v4) : CST.comprehension_clause) =
-  let _v1 = map_for_clause env v1 in
+  let v1 = map_for_clause env v1 in
   let _v2 = map_newline_opt env v2 in
   let v3 =
     match v3 with
@@ -1075,7 +1075,7 @@ and map_comprehension_clause (env : env)
     | None -> []
   in
   let _v4 = map_newline_opt env v4 in
-  List_.flatten v3
+  List_.flatten (v1 :: v3)
 
 and map_comprehension_expression (env : env)
     ((v1, v2, v3, v4, v5) : CST.comprehension_expression) =
@@ -1087,8 +1087,8 @@ and map_comprehension_expression (env : env)
   Comprehension (Array, (v1, (v2, v4), v5)) |> G.e
 
 and map_type_parameter_list (env : env)
-    ((v1, v2, v3, v4) : CST.curly_expression) : type_parameter list =
-  let _v1 = (* "{" *) token env v1 in
+    ((v1, v2, v3, v4) : CST.curly_expression) : type_parameters =
+  let lc = (* "{" *) token env v1 in
   let v2 =
     match v2 with
     | Some (v1, v2) ->
@@ -1109,8 +1109,8 @@ and map_type_parameter_list (env : env)
     | Some tok -> (* "," *) Some (token env tok)
     | None -> None
   in
-  let _v4 = (* "}" *) token env v4 in
-  v2
+  let rc = (* "}" *) token env v4 in
+  (lc, v2, rc)
 
 and map_definition (env : env) (x : CST.definition) : stmt =
   match x with
@@ -1130,22 +1130,22 @@ and map_definition (env : env) (x : CST.definition) : stmt =
       let v1 = map_tok_abst_pat_3d340f6_type env v1 in
       let tparams =
         match v3 with
-        | None -> []
-        | Some (_, x) -> map_type_parameter_list env x
+        | None -> None
+        | Some (_, x) -> Some (map_type_parameter_list env x)
       in
       let attrs = map_type_clause_opt env v4 in
-      let ent = map_anon_choice_id_00cc266_ent ~attrs ~tparams env v2 in
+      let ent = map_anon_choice_id_00cc266_ent ~attrs ?tparams env v2 in
       let _v5 = (* "end" *) token env v5 in
       DefStmt (ent, TypeDef { tbody = AbstractType v1 }) |> G.s
   | `Prim_defi (v1, v2, v3, v4, v5, v6) ->
       (* primitive type *)
       let tparams =
         match v3 with
-        | None -> []
-        | Some (_, x) -> map_type_parameter_list env x
+        | None -> None
+        | Some (_, x) -> Some (map_type_parameter_list env x)
       in
       let attrs = map_type_clause_opt env v4 in
-      let ent = map_anon_choice_id_00cc266_ent ~attrs ~tparams env v2 in
+      let ent = map_anon_choice_id_00cc266_ent ~attrs ?tparams env v2 in
       let i = map_integer_literal env v5 in
       let _v6 = (* "end" *) token env v6 in
       DefStmt (ent, TypeDef { tbody = OtherTypeKind (str env v1, [ G.E i ]) })
@@ -1159,14 +1159,14 @@ and map_definition (env : env) (x : CST.definition) : stmt =
       let v2 = (* "struct" *) token env v2 in
       let tparams =
         match v4 with
-        | None -> []
-        | Some (_, x) -> map_type_parameter_list env x
+        | None -> None
+        | Some (_, x) -> Some (map_type_parameter_list env x)
       in
       let attrs = v1 @ map_type_clause_opt env v5 in
       let _v6 = map_terminator_opt env v6 in
       let v7 = map_source_file env v7 in
       let v8 = (* "end" *) token env v8 in
-      let ent = map_anon_choice_id_00cc266_ent ~attrs ~tparams env v3 in
+      let ent = map_anon_choice_id_00cc266_ent ~attrs ?tparams env v3 in
       DefStmt
         (ent, TypeDef { tbody = AndType (v2, List_.map (fun x -> F x) v7, v8) })
       |> G.s
@@ -1184,7 +1184,7 @@ and map_definition (env : env) (x : CST.definition) : stmt =
                 (* What kind of a sick, twisted psychopath would make the name of a macro
                    the result of a run-time value????
                 *)
-                { name = EDynamic exp; attrs = []; tparams = [] })
+                { name = EDynamic exp; attrs = []; tparams = None })
       in
       let _v3 = (* immediate_paren *) token env v3 in
       let _, v4, _ = map_parameter_list env v4 in
@@ -1458,24 +1458,21 @@ and map_function_signature ~body ~func_tok (env : env)
     in
     let tparams =
       match v2 with
-      | Some (v1, v2) ->
-          let _v1 = (* immediate_brace *) token env v1 in
-          let v2 = map_type_parameter_list env v2 in
-          v2
-      | None -> []
+      | None -> None
+      | Some (_, x) -> Some (map_type_parameter_list env x)
     in
     match v1 with
     | `Id tok ->
         let id = map_identifier env tok in
-        basic_entity ~tparams ~attrs id
+        basic_entity ?tparams ~attrs id
     | `Op x ->
         let id = map_operator env x in
-        basic_entity ~tparams ~attrs id
+        basic_entity ?tparams ~attrs id
     | `LPAR_choice_id_RPAR (v1, v2, v3) ->
         let _v1 = (* "(" *) token env v1 in
         let id = map_anon_choice_id_267a5f7 env v2 in
         let _v3 = (* ")" *) token env v3 in
-        basic_entity ~tparams ~attrs id
+        basic_entity ?tparams ~attrs id
     | `Field_exp x ->
         { name = EDynamic (map_field_expression env x); attrs; tparams }
     | `LPAR_typed_param_RPAR (v1, v2, v3) ->
@@ -1506,7 +1503,7 @@ and map_function_signature ~body ~func_tok (env : env)
         }
     | `Interp_exp x -> (
         match map_interpolation_expression_either env x with
-        | Left id -> basic_entity ~attrs ~tparams id
+        | Left id -> basic_entity ~attrs ?tparams id
         | Right exp -> { name = EDynamic exp; attrs; tparams })
   in
   let func_tok =
@@ -1527,11 +1524,11 @@ and map_function_signature ~body ~func_tok (env : env)
   (ent, { fkind = (Function, func_tok); fparams; frettype; fbody = body })
 
 and map_import_alias (env : env) ((v1, v2, v3) : CST.import_alias) :
-    (dotted_ident * alias) option =
+    (dotted_ident * ident) option =
   let* v1 = map_importable env v1 in
   let _v2 = (* "as" *) token env v2 in
   let v3 = map_identifier env v3 in
-  Some (v1, (v3, empty_id_info ()))
+  Some (v1, v3)
 
 and map_import_list (env : env) ((v1, v2) : CST.import_list) =
   let v1 = map_anon_choice_impo_a542259 env v1 in
@@ -1557,7 +1554,7 @@ and map_exportable (env : env) (x : CST.exportable) =
          We will just discard the entire import in that case, but continue.
       *)
       todo env x
-  | `Interp_exp (`Pat_aa33ccb x) -> Some [ map_word_identifier env x ]
+  | `Interp_exp (`Semg_exte_meta x) -> Some [ map_word_identifier env x ]
   | `LPAR_choice_id_RPAR (v1, v2, v3) ->
       let _v1 = (* "(" *) token env v1 in
       let v2 = map_anon_choice_id_267a5f7 env v2 in
@@ -1612,7 +1609,7 @@ and map_interpolation_expression_either (env : env)
           let id = (s1 ^ s, Tok.combine_toks t1 [ tok ]) in
           Left id
       | __else__ -> Right (OtherExpr (v1, [ G.E v2 ]) |> G.e))
-  | `Pat_aa33ccb x -> Left (str env x)
+  | `Semg_exte_meta x -> Left (str env x)
 
 and map_interpolation_expression (env : env) (x : CST.interpolation_expression)
     : expr =
@@ -1637,7 +1634,7 @@ and map_interpolation_parameter (env : env) (x : CST.interpolation_expression) :
           let id = (s1 ^ s, Tok.combine_toks t1 [ tok ]) in
           Param (param_of_id id)
       | __else__ -> OtherParam (v1, [ G.E v2 ]))
-  | `Pat_aa33ccb x -> Param (param_of_id (str env x))
+  | `Semg_exte_meta x -> Param (param_of_id (str env x))
 
 and map_keyword_parameters (env : env)
     ((v1, v2, v3, v4) : CST.keyword_parameters) =
@@ -1730,7 +1727,7 @@ and map_named_field_type_parameter (env : env) ((v1, v2, v3) : CST.named_field)
   let v1 =
     match v1 with
     | `Id id -> map_identifier env id
-    | `Interp_exp (`Pat_aa33ccb x) -> map_word_identifier env x
+    | `Interp_exp (`Semg_exte_meta x) -> map_word_identifier env x
     | `Interp_exp (`DOLLAR_choice_num (v1, v2)) -> todo env (v1, v2)
   in
   let _v2 = (* "=" *) token env v2 in
@@ -1802,10 +1799,15 @@ and map_parametrized_type_expression (env : env)
     ((v1, v2, v3) : CST.parametrized_type_expression) =
   let v1 = map_primary_expression env v1 in
   let _v2 = (* immediate_brace *) token env v2 in
-  let v3 = map_type_parameter_list env v3 in
+  let open_, v3, close = map_type_parameter_list env v3 in
   OtherExpr
     ( ("type_parametrized", fake "type_parametrized"),
-      [ G.E v1; G.Anys (List_.map (fun x -> G.Tp x) v3) ] )
+      [
+        G.E v1;
+        G.Anys
+          (List_.flatten
+             [ [ G.Tk open_ ]; List_.map (fun x -> G.Tp x) v3; [ G.Tk close ] ]);
+      ] )
   |> G.e
 
 and map_primary_expression (env : env) (x : CST.primary_expression) : expr =
@@ -1886,7 +1888,7 @@ and map_quotable (env : env) (x : CST.quotable) : expr =
   | `Curl_exp x ->
       (* This can be called while looking for the subject of a where clause.
        *)
-      let tparams = map_type_parameter_list env x in
+      let _, tparams, _ = map_type_parameter_list env x in
       OtherExpr
         ( ("curly", fake "curly"),
           [ G.Anys (List_.map (fun x -> G.Tp x) tparams) ] )
@@ -1906,9 +1908,8 @@ and map_quote_expression (env : env) ((v1, v2) : CST.quote_expression) : expr =
     | `Id x -> map_identifier_exp env x
     | `Op x -> map_operator_exp env x
     | `Imme_brace_curl_exp (id, x) ->
-        let params =
-          map_type_parameter_list env x |> List_.map (fun x -> G.Tp x)
-        in
+        let _, xs, _ = map_type_parameter_list env x in
+        let params = xs |> List_.map (fun x -> G.Tp x) in
         OtherExpr (("TyParams", G.fake "TyParams"), G.I (str env id) :: params)
         |> G.e
     | `Imme_brac_array (v1, v2) ->
@@ -2066,7 +2067,7 @@ and map_statement (env : env) (x : CST.statement) : stmt list =
               | None -> None
             in
             let _v7 = (* "end" *) token env v7 in
-            List.fold_right (fun k acc -> Some (k acc)) v5 v6
+            List_.fold_right (fun k acc -> Some (k acc)) v5 v6
           in
           [ If (v1, Cond v2, v4, elses) |> G.s ]
       | `Try_stmt (v1, v2, v3, v4, v5) -> (
@@ -2133,7 +2134,7 @@ and map_statement (env : env) (x : CST.statement) : stmt list =
       | `Export_stmt (v1, v2, v3) ->
           let v1 = (* "export" *) str env v1 in
           let v3 =
-            List.filter_map
+            List_.filter_map
               (fun v2 ->
                 let* v2 = map_exportable env v2 in
                 Some (G.Anys (List_.map (fun x -> G.I x) v2)))
@@ -2152,15 +2153,15 @@ and map_statement (env : env) (x : CST.statement) : stmt list =
             | `Import_list x ->
                 map_import_list env x
                 (* Filter map here, as unrelated imports need not interfere with each other. *)
-                |> List.filter_map Fun.id
-                |> List_.map (fun (dotted, aliasopt) ->
+                |> List_.filter_map Fun.id
+                |> List_.map (fun (dotted, idopt) ->
                        if is_using then
                          let dk =
                            ImportAll (tk, DottedName dotted, tk) |> G.d
                          in
-                         match aliasopt with
+                         match idopt with
                          | None -> dk
-                         | Some (id, _idinfo) ->
+                         | Some id ->
                              (* It doesn't really make sense to me how you would use an `as`
                                  in conjunction with something which is like a wildcard import.
                                  In fact, the Julia documentation says you're not supposed to do
@@ -2172,7 +2173,13 @@ and map_statement (env : env) (x : CST.statement) : stmt list =
                                ( ("using_as", G.fake "using_as"),
                                  [ G.Dir dk; G.I id ] )
                              |> G.d
-                       else ImportAs (tk, DottedName dotted, aliasopt) |> G.d)
+                       else
+                         let aliasopt =
+                           match idopt with
+                           | None -> None
+                           | Some id -> Some (id, G.empty_id_info ())
+                         in
+                         ImportAs (tk, DottedName dotted, aliasopt) |> G.d)
             | `Sele_import x -> (
                 match map_selected_import ~import_tok:tk env x with
                 | None -> []
@@ -2191,23 +2198,20 @@ and map_statement (env : env) (x : CST.statement) : stmt list =
               let l_exp, _, r_exp = map_assignment env x in
               [
                 DefStmt
-                  ( { name = EDynamic l_exp; attrs; tparams = [] },
-                    VarDef { vinit = Some r_exp; vtype = None } )
+                  ( { name = EDynamic l_exp; attrs; tparams = None },
+                    VarDef { vinit = Some r_exp; vtype = None; vtok = G.no_sc }
+                  )
                 |> G.s;
               ]
           | `Id tok ->
               let id = map_identifier env tok in
-              [
-                DefStmt
-                  (basic_entity ~attrs id, VarDef { vinit = None; vtype = None })
-                |> G.s;
-              ]
+              [ DefStmt (basic_entity ~attrs id, VarDef G.empty_var) |> G.s ]
           | `Typed_exp x ->
               let l_exp, _, ty = map_typed_expression env x in
               [
                 DefStmt
-                  ( { name = EDynamic l_exp; attrs; tparams = [] },
-                    VarDef { vinit = None; vtype = Some ty } )
+                  ( { name = EDynamic l_exp; attrs; tparams = None },
+                    VarDef { vinit = None; vtype = Some ty; vtok = G.no_sc } )
                 |> G.s;
               ])
       | `Local_stmt (v1, v2) ->
@@ -2356,8 +2360,7 @@ and map_typed_parameter (env : env) (v1 : CST.typed_parameter) : parameter =
       | Some x -> (
           match x with
           | `Id tok ->
-              Param
-                (param_of_id ~pattrs ~ptype:(Some v3) (map_identifier env tok))
+              Param (param_of_id ~pattrs ~ptype:v3 (map_identifier env tok))
           | `Tuple_exp x ->
               let pat = map_tuple_pat env x in
               OtherParam (("param", fake "param"), [ G.P pat ])
@@ -2438,17 +2441,19 @@ and map_where_clause (env : env) ((v1, v2) : CST.where_clause) : G.attribute =
 
 let parse file =
   H.wrap_parser
-    (fun () -> Tree_sitter_julia.Parse.file file)
-    (fun cst ->
+    (fun () -> Tree_sitter_julia.Parse.file !!file)
+    (fun cst _extras ->
       let env = { H.file; conv = H.line_col_to_pos file; extra = Program } in
       map_source_file env cst)
 
 let parse_pattern str =
   H.wrap_parser
     (fun () -> Tree_sitter_julia.Parse.string str)
-    (fun cst ->
-      let file = "<pattern>" in
-      let env = { H.file; conv = Hashtbl.create 0; extra = Pattern } in
+    (fun cst _extras ->
+      let file = Fpath.v "<pattern>" in
+      let env =
+        { H.file; conv = H.line_col_to_pos_pattern str; extra = Pattern }
+      in
       match map_source_file env cst with
       | [ s ] -> (
           match s.G.s with

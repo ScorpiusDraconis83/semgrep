@@ -5,8 +5,7 @@
 
 open Common
 open Fpath_.Operators
-
-let logger = Logging.get_logger [ __MODULE__ ]
+module Log = Log_targeting.Log
 
 (****************************************************************************)
 (* Types *)
@@ -66,7 +65,7 @@ let prepend_period_if_needed s =
 let has_extension extensions =
   has_suffix (List_.map prepend_period_if_needed extensions)
 
-let has_lang_extension lang = has_extension (Lang.ext_of_lang lang)
+let has_lang_extension lang = has_extension (Lang.exts_of_lang lang)
 
 let has_excluded_lang_extension lang =
   has_extension (Lang.excluded_exts_of_lang lang)
@@ -91,7 +90,7 @@ let is_executable =
   Or (has_extension [ ".exe" ], Test_path f)
 
 let get_first_line path =
-  UCommon.with_open_infile !!path (fun ic ->
+  UFile.with_open_in path (fun ic ->
       try input_line ic with
       | End_of_file -> (* empty file *) "")
 
@@ -100,12 +99,12 @@ let get_first_line path =
    a single filesystem block.
 *)
 let get_first_block ?(block_size = 4096) path =
-  UCommon.with_open_infile !!path (fun ic ->
+  UFile.with_open_in path (fun ic ->
       let len = min block_size (in_channel_length ic) in
       really_input_string ic len)
 
-let shebang_re = lazy (Pcre_.regexp "^#![ \t]*([^ \t]*)[ \t]*([^ \t].*)?$")
-let split_cmd_re = lazy (Pcre_.regexp "[ \t]+")
+let shebang_re = lazy (Pcre2_.regexp "^#![ \t]*([^ \t]*)[ \t]*([^ \t].*)?$")
+let split_cmd_re = lazy (Pcre2_.regexp "[ \t]+")
 
 (*
    A shebang supports at most the name of the script and one argument:
@@ -131,11 +130,11 @@ let split_cmd_re = lazy (Pcre_.regexp "[ \t]+")
      "#!/usr/bin/env -S bash -e -u" -> ["/usr/bin/env"; "bash"; "-e"; "-u"]
 *)
 let parse_shebang_line s =
-  let matched = Pcre_.exec_noerr ~rex:(Lazy.force shebang_re) s in
+  let matched = Pcre2_.exec_noerr ~rex:(Lazy.force shebang_re) s in
   match matched with
   | None -> None
   | Some matched -> (
-      match Pcre.get_substrings matched with
+      match Pcre2.get_substrings matched with
       | [| _; arg0; "" |] -> Some [ arg0 ]
       | [| _; "/usr/bin/env" as arg0; arg1 |] -> (
           (* approximate emulation of 'env -S'; should work if the command
@@ -143,7 +142,7 @@ let parse_shebang_line s =
           match string_chop_prefix ~pref:"-S" arg1 with
           | Some packed_args ->
               let args =
-                Pcre_.split_noerr ~rex:(Lazy.force split_cmd_re)
+                Pcre2_.split_noerr ~rex:(Lazy.force split_cmd_re)
                   ~on_error:[ packed_args ] packed_args
                 |> List.filter (fun fragment -> fragment <> "")
               in
@@ -157,7 +156,7 @@ let get_shebang_command path = get_first_line path |> parse_shebang_line
 
 let uses_shebang_command_name cmd_names =
   let f path =
-    logger#info "checking for a #! in %s" !!path;
+    Log.info (fun m -> m "checking for a #! in %s" !!path);
     match get_shebang_command path with
     | Some ("/usr/bin/env" :: cmd_name :: _) -> List.mem cmd_name cmd_names
     | Some (cmd_path :: _) ->
@@ -172,10 +171,10 @@ let uses_shebang_command_name cmd_names =
    In case of an error, the result is false.
  *)
 let regexp pat =
-  let rex = Pcre_.regexp pat in
+  let rex = Pcre2_.regexp pat in
   let f path =
     let s = get_first_block path in
-    Pcre_.pmatch_noerr ~rex s
+    Pcre2_.pmatch_noerr ~rex s
   in
   Test_path f
 
@@ -186,7 +185,7 @@ let is_executable_script cmd_names =
 
 (*
    Matches if either
-   - language has extension in Lang.ext_of_lang
+   - language has extension in Lang.exts_of_lang
    - language is script with shebang in Lang.shebangs_of_lang
 
    General test for a script:
@@ -242,6 +241,7 @@ let inspect_file_p (lang : Lang.t) path =
     | Bash
     | C
     | Cairo
+    | Circom
     | Clojure
     | Cpp
     | Csharp
@@ -257,12 +257,15 @@ let inspect_file_p (lang : Lang.t) path =
     | Kotlin
     | Lisp
     | Lua
+    | Move_on_sui
+    | Move_on_aptos
     | Ocaml
     | Promql
     | Protobuf
     | Python2
     | Python3
     | Python
+    | Ql
     | R
     | Ruby
     | Rust
@@ -300,5 +303,4 @@ let inspect_file lang path =
   let bool_res = inspect_file_p lang path in
   wrap_with_error_message lang path bool_res
 
-let inspect_files lang paths =
-  Result_.partition_result (inspect_file lang) paths
+let inspect_files lang paths = Result_.partition (inspect_file lang) paths

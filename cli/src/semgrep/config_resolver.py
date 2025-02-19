@@ -5,7 +5,9 @@ import time
 from collections import OrderedDict
 from enum import auto
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
+from tempfile import mkstemp
 from typing import Any
 from typing import Dict
 from typing import List
@@ -19,18 +21,15 @@ from urllib.parse import urlparse
 from urllib.parse import urlsplit
 
 import requests
-import ruamel.yaml
-from rich import progress
 from ruamel.yaml import YAMLError
 
 import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semgrep import __VERSION__
+from semgrep import tracing
 from semgrep.app import auth
-from semgrep.console import console
 from semgrep.constants import CLI_RULE_ID
 from semgrep.constants import Colors
 from semgrep.constants import DEFAULT_SEMGREP_APP_CONFIG_URL
-from semgrep.constants import DEFAULT_SEMGREP_CONFIG_NAME
 from semgrep.constants import ID_KEY
 from semgrep.constants import MISSED_KEY
 from semgrep.constants import PLEASE_FILE_ISSUE_TEXT
@@ -39,12 +38,13 @@ from semgrep.error import INVALID_API_KEY_EXIT_CODE
 from semgrep.error import InvalidRuleSchemaError
 from semgrep.error import SemgrepError
 from semgrep.error import UNPARSEABLE_YAML_EXIT_CODE
+from semgrep.error_location import Span
 from semgrep.rule import Rule
 from semgrep.rule import rule_without_metadata
 from semgrep.rule_lang import EmptySpan
 from semgrep.rule_lang import EmptyYamlException
 from semgrep.rule_lang import parse_config_preserve_spans
-from semgrep.rule_lang import Span
+from semgrep.rule_lang import prepend_rule_path
 from semgrep.rule_lang import validate_yaml
 from semgrep.rule_lang import YamlMap
 from semgrep.rule_lang import YamlTree
@@ -55,13 +55,10 @@ from semgrep.util import is_url
 from semgrep.util import with_color
 from semgrep.verbose_logging import getLogger
 
-
 logger = getLogger(__name__)
 
 AUTO_CONFIG_KEY = "auto"
 AUTO_CONFIG_LOCATION = "c/auto"
-
-MISSING_RULE_ID = "no-rule-id"
 
 DEFAULT_CONFIG = {
     "rules": [
@@ -101,7 +98,6 @@ class ConfigLoader:
         self,
         config_str: str,
         project_url: Optional[str] = None,
-        config_str_for_jsonnet: Optional[str] = None,
     ) -> None:
         """
         Mutates Metrics state!
@@ -133,16 +129,25 @@ class ConfigLoader:
         else:
             state.metrics.add_feature("config", "local")
             self._origin = ConfigType.LOCAL
-            # For local imports, use the jsonnet config str
-            # if it exists
-            config_str = (
-                config_str_for_jsonnet if config_str_for_jsonnet else config_str
-            )
             self._config_path = str(Path(config_str).expanduser())
 
         if self.is_registry_url():
             state.metrics.is_using_registry = True
             state.metrics.add_registry_url(self._config_path)
+
+    @classmethod
+    def includes_remote_config(cls, configs: Sequence[str]) -> bool:
+        """
+        Returns True if any of the configs are remote
+        """
+        return any(
+            config == AUTO_CONFIG_KEY
+            or config == "r2c"
+            or is_product_names(config)
+            or is_registry_id(config)
+            or is_url(config)
+            for config in configs
+        )
 
     def load_config(self) -> List[ConfigFile]:
         """
@@ -256,6 +261,7 @@ class ConfigLoader:
         self, require_repo_name: bool
     ) -> out.ProjectMetadata:
         repo_name = os.environ.get("SEMGREP_REPO_NAME")
+        repo_display_name = os.environ.get("SEMGREP_REPO_DISPLAY_NAME", repo_name)
 
         if repo_name is None:
             if require_repo_name:
@@ -266,9 +272,9 @@ class ConfigLoader:
                 repo_name = "unknown"
 
         return out.ProjectMetadata(
-            semgrep_version=out.Version(__VERSION__),
             scan_environment="semgrep-scan",
             repository=repo_name,
+            repo_display_name=repo_display_name,
             repo_url=None,
             branch=None,
             commit=None,
@@ -303,7 +309,6 @@ class ConfigLoader:
         )
 
         request = out.ScanRequest(
-            meta=out.RawJson({}),  # required for now, but we won't populate it
             scan_metadata=out.ScanMetadata(
                 cli_version=out.Version(__VERSION__),
                 unique_id=out.Uuid(str(state.local_scan_id)),
@@ -353,6 +358,7 @@ class ConfigLoader:
                 )
 
             scan_response = out.ScanResponse.from_json(response.json())
+            get_state().traces.set_scan_info(scan_response.info)
             return ConfigFile(None, scan_response.config.rules.to_json_string(), url)
 
         except requests.exceptions.RetryError as ex:
@@ -407,31 +413,24 @@ def read_config_at_path(loc: Path, base_path: Optional[Path] = None) -> ConfigFi
 def read_config_folder(loc: Path, relative: bool = False) -> List[ConfigFile]:
     configs = []
     for l in loc.rglob("*"):
-        # Allow manually specified paths with ".", but don't auto-expand them
-        correct_suffix = is_config_suffix(l)
-        if not _is_hidden_config(l.relative_to(loc)) and correct_suffix:
-            if l.is_file():
-                configs.append(read_config_at_path(l, loc if relative else None))
+        if is_config_suffix(l) and l.is_file():
+            configs.append(read_config_at_path(l, loc if relative else None))
     return configs
 
 
+@tracing.trace()
 def parse_config_files(
     loaded_config_infos: List[ConfigFile],
-) -> Dict[str, YamlTree]:
+    force_jsonschema: bool = False,
+) -> Tuple[Dict[str, YamlTree], List[SemgrepError]]:
     """
     Parse a list of config files into rules
     This assumes that config_id is set for local rules
     but is None for registry rules
     """
     config = {}
-    for config_id, contents, config_path in progress.track(
-        loaded_config_infos,
-        description=f"  parsing {len(loaded_config_infos)} rules",
-        transient=True,
-        # expected to take just 2-3 seconds with less than 500
-        disable=len(loaded_config_infos) < 500,
-        console=console,
-    ):
+    errors: List[SemgrepError] = []
+    for config_id, contents, config_path in loaded_config_infos:
         try:
             if not config_id:  # registry rules don't have config ids
                 # Note: we must disambiguate registry sourced remote rules from
@@ -455,7 +454,11 @@ def parse_config_files(
                 filename = f"{config_path[:20]}..."
             else:
                 filename = config_path
-            config.update(parse_config_string(config_id, contents, filename))
+            config_data, config_errors = parse_config_string(
+                config_id, contents, filename, force_jsonschema=force_jsonschema
+            )
+            config.update(config_data)
+            errors.extend(config_errors)
         except InvalidRuleSchemaError as e:
             if (
                 config_id == REGISTRY_CONFIG_ID
@@ -467,20 +470,24 @@ def parse_config_files(
                 raise e
             else:
                 raise e
-    return config
+    return config, errors
 
 
+@tracing.trace()
 def resolve_config(
-    config_str: str, project_url: Optional[str] = None
-) -> Dict[str, YamlTree]:
+    config_str: str,
+    project_url: Optional[str] = None,
+    force_jsonschema: bool = False,
+) -> Tuple[Dict[str, YamlTree], List[SemgrepError]]:
     """resolves if config arg is a registry entry, a url, or a file, folder, or loads from defaults if None"""
     start_t = time.time()
     config_loader = ConfigLoader(config_str, project_url)
-    config = parse_config_files(config_loader.load_config())
-
+    config, errors = parse_config_files(
+        config_loader.load_config(), force_jsonschema=force_jsonschema
+    )
     if config:
         logger.debug(f"loaded {len(config)} configs in {time.time() - start_t}")
-    return config
+    return config, errors
 
 
 class Config:
@@ -505,23 +512,37 @@ class Config:
         self.missed_rule_count = missed_rule_count
 
     @classmethod
+    @tracing.trace()
     def from_pattern_lang(
         cls, pattern: str, lang: str, replacement: Optional[str] = None
-    ) -> Tuple["Config", Sequence[SemgrepError]]:
+    ) -> Tuple["Config", List[SemgrepError]]:
         config_dict = manual_config(pattern, lang, replacement)
         valid, errors, _ = cls._validate(config_dict)
         return cls(valid), errors
 
     @classmethod
-    def from_rules_yaml(cls, config: str) -> Tuple["Config", Sequence[SemgrepError]]:
+    @tracing.trace()
+    @lru_cache(maxsize=None)
+    def from_rules_yaml(
+        cls,
+        config: str,
+        no_rewrite_rule_ids: bool = False,
+        force_jsonschema: bool = False,
+    ) -> Tuple["Config", List[SemgrepError]]:
         config_dict: Dict[str, YamlTree] = {}
         errors: List[SemgrepError] = []
 
         try:
             resolved_config_key = CLOUD_PLATFORM_CONFIG_ID
-            config_dict.update(
-                parse_config_string(resolved_config_key, config, filename=None)
+            config_data, config_errors = parse_config_string(
+                resolved_config_key,
+                config,
+                filename=None,
+                no_rewrite_rule_ids=no_rewrite_rule_ids,
+                force_jsonschema=force_jsonschema,
             )
+            config_dict.update(config_data)
+            errors.extend(config_errors)
         except SemgrepError as e:
             errors.append(e)
 
@@ -530,9 +551,13 @@ class Config:
         return cls(valid), errors
 
     @classmethod
+    @tracing.trace()
     def from_config_list(
-        cls, configs: Sequence[str], project_url: Optional[str]
-    ) -> Tuple["Config", Sequence[SemgrepError]]:
+        cls,
+        configs: Sequence[str],
+        project_url: Optional[str],
+        force_jsonschema: bool = False,
+    ) -> Tuple["Config", List[SemgrepError]]:
         """
         Takes in list of files/directories and returns Config object as well as
         list of errors parsing said config files
@@ -547,8 +572,12 @@ class Config:
 
         for i, config in enumerate(configs):
             try:
-                # Patch config_id to fix https://github.com/returntocorp/semgrep/issues/1912
-                resolved_config = resolve_config(config, project_url)
+                # Patch config_id to fix
+                # https://github.com/semgrep/semgrep/issues/1912
+                resolved_config, config_errors = resolve_config(
+                    config, project_url, force_jsonschema=force_jsonschema
+                )
+                errors.extend(config_errors)
                 if not resolved_config:
                     logger.verbose(f"Could not resolve config for {config}. Skipping.")
                     continue
@@ -595,63 +624,33 @@ class Config:
             # re-write the configs to have the hierarchical rule ids
             self._rename_rule_ids(configs)
 
-        # deduplicate rules, ignoring metadata, which is not displayed
-        # in the result
+        # Deduplicate rules, ignoring metadata, which is not displayed
+        # in the result.
+        # Deduplication occurs from left to right so as to have the same
+        # behavior as osemgrep i.e. the first occurrence of each rule
+        # if preserved and subsequent occurrences are discarded.
         return list(
-            OrderedDict(
-                (rule_without_metadata(rule), rule)
-                for rules in configs.values()
-                for rule in rules
-            ).values()
+            reversed(
+                list(
+                    OrderedDict(
+                        (rule_without_metadata(rule), rule)
+                        for rules in reversed(configs.values())
+                        for rule in reversed(rules)
+                    ).values()
+                )
+            )
         )
-
-    @staticmethod
-    def _safe_relative_to(a: Path, b: Path) -> Path:
-        try:
-            return a.relative_to(b)
-        except ValueError:
-            # paths had no common prefix; not possible to relativize
-            return a
-
-    @staticmethod
-    def _sanitize_rule_id_fragment(s: str) -> str:
-        """Make a valid fragment for a rule ID.
-
-        This removes characters that aren't allowed in Semgrep rule IDs.
-        The transformation is irreversible. The result may be an empty
-        string.
-
-        Rule ID format: [a-zA-Z0-9._-]*
-        """
-        return re.sub("[^a-zA-Z0-9._-]", "", s)
-
-    @staticmethod
-    def _convert_config_id_to_prefix(config_id: str) -> str:
-        at_path = Path(config_id)
-        try:
-            at_path = Config._safe_relative_to(at_path, Path.cwd())
-        except FileNotFoundError:
-            pass
-
-        prefix = ".".join(at_path.parts[:-1]).lstrip("./").lstrip(".")
-        if len(prefix):
-            prefix += "."
-        # Remove any remaining special characters that were in the file path.
-        prefix = Config._sanitize_rule_id_fragment(prefix)
-        return prefix
 
     @staticmethod
     def _rename_rule_ids(valid_configs: Mapping[str, Sequence[Rule]]) -> None:
         for config_id, rules in valid_configs.items():
             for rule in rules:
-                rule.rename_id(
-                    f"{Config._convert_config_id_to_prefix(config_id)}{rule.id or MISSING_RULE_ID}"
-                )
+                rule.rename_id(prepend_rule_path(config_id, rule.id))
 
     @staticmethod
     def _validate(
         config_dict: Mapping[str, YamlTree]
-    ) -> Tuple[Mapping[str, Sequence[Rule]], Sequence[SemgrepError], int]:
+    ) -> Tuple[Mapping[str, Sequence[Rule]], List[SemgrepError], int]:
         """
         Take configs and separate into valid and list of errors parsing the invalid ones
         """
@@ -713,8 +712,6 @@ def validate_single_rule(config_id: str, rule_yaml: YamlTree[YamlMap]) -> Rule:
     Validate that a rule dictionary contains all necessary keys
     and can be correctly parsed.
     """
-    rule: YamlMap = rule_yaml.value
-
     # Defaults to search mode if mode is not specified
     return Rule.from_yamltree(rule_yaml)
 
@@ -769,108 +766,55 @@ def indent(msg: str) -> str:
     return "\n".join(["\t" + line for line in msg.splitlines()])
 
 
-def import_callback(base: str, path: str) -> Tuple[str, bytes]:
-    """
-    Instructions to jsonnet for how to resolve
-    import expressions (`local $NAME = $PATH`).
-    The base is the directory of the file and the
-    path is $PATH in the local expression. We will
-    later pass this function to jsonnet, which will
-    use it when resolving imports. By implementing
-    this callback, we support yaml files (jsonnet
-    can otherwise only build against json files)
-    and config specifiers like `p/python`. We also
-    support a library path
-    """
-
-    # If the library path is absolute, assume that's
-    # the intended path. But if it's relative, assume
-    # it's relative to the path semgrep was called from.
-    # This follows the semantics of `jsonnet -J`
-    library_path = os.environ.get("R2C_INTERNAL_JSONNET_LIB")
-
-    if library_path and not os.path.isabs(library_path):
-        library_path = os.path.join(os.curdir, library_path)
-
-    # Assume the path is the library path if it exists,
-    # otherwise try it without the library. This way,
-    # jsonnet will give an error for the path the user
-    # likely expects
-    # TODO throw an error if neither exists?
-    if library_path and os.path.exists(os.path.join(library_path, path)):
-        final_path = os.path.join(library_path, path)
-    else:
-        final_path = os.path.join(base, path)
-    logger.debug(f"import_callback for {path}, base = {base}, final = {final_path}")
-
-    # On the fly conversion from yaml to json.
-    # We can now do 'local x = import "foo.yml";'
-    # TODO: Make this check less jank
-    if final_path and (
-        final_path.split(".")[-1] == "yml" or final_path.split(".")[-1] == "yaml"
-    ):
-        logger.debug(f"loading yaml file {final_path}, converting to JSON on the fly")
-        yaml = ruamel.yaml.YAML(typ="safe")
-        with open(final_path) as fpi:
-            data = yaml.load(fpi)
-        contents = json.dumps(data)
-        filename = final_path
-        return filename, contents.encode()
-
-    logger.debug(f"defaulting to the config resolver for {path}")
-    # Registry-aware import!
-    # Can now do 'local x = import "p/python";'!!
-    # Will also handle `.jsonnet` and `.libsonnet` files
-    # implicitly, since they will be resolved as local files
-    config_infos = ConfigLoader(path, None, final_path).load_config()
-    if len(config_infos) == 0:
-        raise SemgrepError(f"No valid configs imported")
-    elif len(config_infos) > 1:
-        raise SemgrepError(f"Currently configs cannot be imported from a directory")
-    else:
-        (_config_id, contents, config_path) = config_infos[0]
-        return config_path, contents.encode()
-
-
+@tracing.trace()
 def parse_config_string(
-    config_id: str, contents: str, filename: Optional[str]
-) -> Dict[str, YamlTree]:
+    config_id: str,
+    contents: str,
+    filename: Optional[str],
+    no_rewrite_rule_ids: bool = False,
+    force_jsonschema: bool = False,
+) -> Tuple[Dict[str, YamlTree], List[SemgrepError]]:
     if not contents:
         raise SemgrepError(
             f"Empty configuration file {filename}", code=UNPARSEABLE_YAML_EXIT_CODE
         )
 
-    # TODO: Make this check less jank
-    if filename and filename.split(".")[-1] == "jsonnet":
-        logger.error(
-            "Support for Jsonnet rules is experimental and currently meant for internal use only. The syntax may change or be removed at any point."
-        )
-
-        # Importing jsonnet here so that people who aren't using
-        # jsonnet rules don't need to deal with jsonnet as a
-        # dependency, especially while this is internal.
-        try:
-            import _jsonnet  # type: ignore
-        except ImportError:
-            logger.error(
-                "Running jsonnet rules requires the python jsonnet library. Please run `pip install jsonnet` and try again."
-            )
-
-        contents = _jsonnet.evaluate_snippet(
-            filename, contents, import_callback=import_callback
-        )
-
     # Should we guard this code and checks whether filename ends with .json?
+    errors: List[SemgrepError] = []
+
+    rules_tmp_path: Optional[str] = None
+    try:
+        fd, rules_tmp_path = mkstemp(suffix=".rules", prefix="semgrep-", text=True)
+        with os.fdopen(fd, "w") as fp:
+            fp.write(contents)
+        logger.debug(f"Saving rules to {rules_tmp_path}")
+    except Exception as e:
+        logger.debug(f"Failed to write {rules_tmp_path=} to disk: {e}")
+
     try:
         # we pretend it came from YAML so we can keep later code simple
         data = YamlTree.wrap(json.loads(contents), EmptySpan)
-        validate_yaml(data)
-        return {config_id: data}
+        errors.extend(
+            validate_yaml(
+                data,
+                filename,
+                no_rewrite_rule_ids=no_rewrite_rule_ids,
+                force_jsonschema=force_jsonschema,
+                rules_tmp_path=rules_tmp_path,
+            )
+        )
+        return ({config_id: data}, errors)
     except json.decoder.JSONDecodeError:
         pass
 
     try:
-        data = parse_config_preserve_spans(contents, filename)
+        data, config_errors = parse_config_preserve_spans(
+            contents,
+            filename,
+            force_jsonschema=force_jsonschema,
+            rules_tmp_path=rules_tmp_path,
+        )
+        errors.extend(config_errors)
     except EmptyYamlException:
         raise SemgrepError(
             f"Empty configuration file {filename}", code=UNPARSEABLE_YAML_EXIT_CODE
@@ -880,21 +824,7 @@ def parse_config_string(
             f"Invalid YAML file {config_id}:\n{indent(str(se))}",
             code=UNPARSEABLE_YAML_EXIT_CODE,
         )
-    return {config_id: data}
-
-
-def _is_hidden_config(loc: Path) -> bool:
-    """
-    Want to keep rules/.semgrep.yml but not path/.github/foo.yml
-    Also want to keep src/.semgrep/bad_pattern.yml but not ./.pre-commit-config.yaml
-    """
-    return any(
-        part != os.curdir
-        and part != os.pardir
-        and part.startswith(".")
-        and DEFAULT_SEMGREP_CONFIG_NAME not in part
-        for part in loc.parts
-    )
+    return {config_id: data}, errors
 
 
 def is_registry_id(config_str: str) -> bool:
@@ -1025,6 +955,7 @@ def is_pack_id(config_str: str) -> bool:
     return config_str[:2] == "p/"
 
 
+@tracing.trace()
 def get_config(
     pattern: Optional[str],
     lang: Optional[str],
@@ -1032,18 +963,26 @@ def get_config(
     *,
     project_url: Optional[str],
     replacement: Optional[str] = None,
-) -> Tuple[Config, Sequence[SemgrepError]]:
+    no_rewrite_rule_ids: bool = False,
+    force_jsonschema: bool = False,
+) -> Tuple[Config, List[SemgrepError]]:
     if pattern:
         if not lang:
             raise SemgrepError("language must be specified when a pattern is passed")
         config, errors = Config.from_pattern_lang(pattern, lang, replacement)
     elif len(config_strs) == 1 and is_rules(config_strs[0]):
-        config, errors = Config.from_rules_yaml(config_strs[0])
+        config, errors = Config.from_rules_yaml(
+            config_strs[0],
+            no_rewrite_rule_ids=no_rewrite_rule_ids,
+            force_jsonschema=force_jsonschema,
+        )
     elif replacement:
         raise SemgrepError(
             "command-line replacement flag can only be used with command-line pattern; when using a config file add the fix: key instead"
         )
     else:
-        config, errors = Config.from_config_list(config_strs, project_url)
+        config, errors = Config.from_config_list(
+            config_strs, project_url, force_jsonschema=force_jsonschema
+        )
 
     return config, errors

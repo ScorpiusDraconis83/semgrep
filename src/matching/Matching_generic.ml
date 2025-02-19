@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2019-2023 Semgrep Inc.
+ * Copyright (C) 2019-2024 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -14,20 +14,19 @@
  *)
 open Common
 
-(* See the comment in Generic_vs_generic for the choice of B below *)
+(* See the comment in Pattern_vs_code for the choice of B below *)
 module B = AST_generic
 module G = AST_generic
 module MV = Metavariable
 module H = AST_generic_helpers
 module Flag = Flag_semgrep
-
-let logger = Logging.get_logger [ __MODULE__ ]
+module Log = Log_matching.Log
 
 (*****************************************************************************)
 (* Prelude *)
 (*****************************************************************************)
-(* Helper types and functions for Generic_vs_generic.ml.
- * See Generic_vs_generic.ml top comment for more information.
+(* Helper types and functions for Pattern_vs_code.ml.
+ * See its top comment for more information.
  *
  * todo:
  *  - use m_list_in_any_order at some point for:
@@ -109,7 +108,7 @@ type tin = {
    * part of this new tin?
    * alt: use globals or have an another 'env' parameter in the matcher in
    * additionto tin instead of passing them through tin (but that's maybe a big
-   * refactoring of Generic_vs_generic).
+   * refactoring of Pattern_vs_code).
    *)
   lang : Lang.t;
   config : Rule_options.t;
@@ -164,7 +163,7 @@ let (( >>= ) : (tin -> tout) -> (unit -> tin -> tout) -> tin -> tout) =
   let xs = m1 tin in
   (* try m2 on each possible returned bindings *)
   let xxs = xs |> List_.map (fun binding -> m2 () binding) in
-  List.flatten xxs
+  List_.flatten xxs
 
 (* the disjunctive combinator *)
 let (( >||> ) : (tin -> tout) -> (tin -> tout) -> tin -> tout) =
@@ -188,7 +187,7 @@ let (return : tin -> tout) = fun tin -> [ tin ]
 
 let (fail : tin -> tout) =
  fun _tin ->
-  if !Flag.debug_matching then failwith "Generic_vs_generic.fail: Match failure";
+  if !Flag.debug_matching then failwith "Pattern_vs_code.fail: Match failure";
   []
 
 let or_list m a bs =
@@ -211,7 +210,7 @@ let ( let* ) o f = o >>= f
      match o with
      | None -> fail ()
      | Some x -> f x
-   useful in Generic_vs_generic when see code like 'None -> fail()'
+   useful in Pattern_vs_code when see code like 'None -> fail()'
 *)
 
 (*****************************************************************************)
@@ -219,7 +218,11 @@ let ( let* ) o f = o >>= f
 (*****************************************************************************)
 
 let add_mv_capture key value (env : tin) =
-  { env with mv = (key, value) :: env.mv }
+  (* Anonymous metavariables do not unify, so they don't go into
+     the environment.
+  *)
+  if Mvar.is_anonymous_metavar key then env
+  else { env with mv = (key, value) :: env.mv }
 
 let extend_stmts_matched rightmost_stmt (env : tin) =
   let stmts_matched = rightmost_stmt :: env.stmts_matched in
@@ -269,7 +272,7 @@ let rec equal_ast_bound_code (config : Rule_options.t) (a : MV.mvalue)
         | None, _ ->
             true
         | Some i1, Some i2 ->
-            AST_generic_equals.with_structural_equal G.equal_id_info i1 i2
+            (not config.unify_ids_strictly) || G.equal_id_info i1 i2
         | Some _, None -> false)
     (* In Ruby, they use atoms for metaprogramming to generate fields
      * (e.g., 'serialize :tags ... post.tags') in which case we want
@@ -319,12 +322,12 @@ let rec equal_ast_bound_code (config : Rule_options.t) (a : MV.mvalue)
            code and the matching code to be the same, but we also seem
            to be a ways from that. *)
 
-        (* Note that because we want to retain the position information
-         * of the matched code in the environment (e.g. for the -pvar
-         * sgrep command line argument), we can not just use the
-         * generic '=' OCaml operator as 'a' and 'b' may represent
-         * the same code but they will contain leaves in their AST
-         * with different position information.
+        (* Note that because we want to retain the position information of the
+         * matched code in the environment (e.g. for autofix or anything else
+         * that might want the original text), we can not just use the generic
+         * '=' OCaml operator as 'a' and 'b' may represent the same code but
+         * they will contain leaves in their AST with different position
+         * information.
 
          * old: So before doing
          * the comparison we just need to remove/abstract-away
@@ -337,14 +340,14 @@ let rec equal_ast_bound_code (config : Rule_options.t) (a : MV.mvalue)
          * - position information (see adhoc AST_generic.equal_tok)
          * - id_svalue (see the special @equal for id_svalue)
          *)
-        MV.Structural.equal_mvalue a b
+        MV.equal_mvalue a b
     (* TODO still needed now that we have the better MV.Id of id_info? *)
     | MV.Id _, MV.E { e = G.N (G.Id (b_id, b_id_info)); _ } ->
         (* TOFIX: regression if remove this code *)
         (* Allow identifier nodes to match pure identifier expressions *)
 
         (* You should prefer to add metavar as expression (G.E), not id (G.I),
-         * (see Generic_vs_generic.m_ident_and_id_info_add_in_env_Expr)
+         * (see m_ident_and_id_info_add_in_env_Expr)
          * but in some cases you have no choice and you need to match an expr
          * metavar with an id metavar.
          * For example, we want the pattern 'const $X = foo.$X' to match
@@ -359,9 +362,8 @@ let rec equal_ast_bound_code (config : Rule_options.t) (a : MV.mvalue)
     | _, _ -> false
   in
   if not res then
-    logger#ldebug
-      (lazy
-        (spf "A != B\nA = %s\nB = %s\n" (MV.str_of_mval a) (MV.str_of_mval b)));
+    Log.debug (fun m ->
+        m "A != B\nA = %s\nB = %s\n" (MV.str_of_mval a) (MV.str_of_mval b));
   res
 
 let check_and_add_metavar_binding ((mvar : MV.mvar), valu) (tin : tin) =
@@ -383,11 +385,10 @@ let (envf : MV.mvar G.wrap -> MV.mvalue -> tin -> tout) =
  fun (mvar, _imvar) any tin ->
   match check_and_add_metavar_binding (mvar, any) tin with
   | None ->
-      logger#ldebug (lazy (spf "envf: fail, %s (%s)" mvar (MV.str_of_mval any)));
+      Log.debug (fun m -> m "envf: fail, %s (%s)" mvar (MV.str_of_mval any));
       fail tin
   | Some new_binding ->
-      logger#ldebug
-        (lazy (spf "envf: success, %s (%s)" mvar (MV.str_of_mval any)));
+      Log.debug (fun m -> m "envf: success, %s (%s)" mvar (MV.str_of_mval any));
       return new_binding
 
 let default_environment lang config =
@@ -409,7 +410,26 @@ let environment_of_any lang config any =
   | G.Pr prog -> environment_of_program lang config prog
   | _ -> default_environment lang config
 
-let wipe_wildcard_imports f tin = f { tin with wildcard_imports = [] }
+(* Previously wipe_wildcard_imports removes wildcard import
+   information not only for the specified function but also for all
+   subsequent matching functions that take its output. This is
+   problematic because some subtree matchings might still require
+   wildcard import information. For example, in top-level assignments,
+   wildcard import information is removed when matching the LHS global
+   identifier and also for the RHS class name identifier, even though
+   it is still needed for the latter.
+
+   The current implementation restores wildcard import information
+   after executing only the specified function. *)
+let wipe_wildcard_imports f tin =
+  let wildcard_imports = tin.wildcard_imports in
+  let tout = f { tin with wildcard_imports = [] } in
+  tout |> List_.map (fun tin -> { tin with wildcard_imports })
+
+let with_additional_wildcard_import dotted f tin =
+  let wildcard_imports = tin.wildcard_imports in
+  let tout = f { tin with wildcard_imports = dotted :: wildcard_imports } in
+  tout |> List_.map (fun tin -> { tin with wildcard_imports })
 
 (*****************************************************************************)
 (* Helpers *)
@@ -490,10 +510,10 @@ let regexp_matcher_of_regexp_string s =
     in
     (* old: let re = Str.regexp x in (fun s -> Str.string_match re s 0) *)
     (* TODO: add `ANCHORED to be consistent with Python re.match (!re.search)*)
-    let re = Pcre_.regexp ~flags x in
+    let re = Pcre2_.regexp ~flags x in
     fun s2 ->
-      Pcre_.pmatch_noerr ~rex:re s2 |> fun b ->
-      logger#debug "regexp match: %s on %s, result = %b" s s2 b;
+      Pcre2_.pmatch_noerr ~rex:re s2 |> fun b ->
+      Log.debug (fun m -> m "regexp match: %s on %s, result = %b" s s2 b);
       b)
   else failwith (spf "This is not a PCRE-compatible regexp: " ^ s)
 
@@ -553,6 +573,15 @@ let rec m_list_prefix f a b =
   | [], _ -> return ()
   | _ :: _, _ -> fail ()
 
+let rec m_list_subsequence f a b =
+  match (a, b) with
+  | xa :: aas, xb :: bbs ->
+      f xa xb
+      >>= (fun () -> m_list_subsequence f aas bbs)
+      >||> m_list_subsequence f a bbs
+  | [], _ -> return ()
+  | _ -> fail ()
+
 let rec m_list_with_dots ~less_is_ok f is_dots xsa xsb =
   match (xsa, xsb) with
   | [], [] -> return ()
@@ -571,6 +600,14 @@ let rec m_list_with_dots ~less_is_ok f is_dots xsa xsb =
   | [], _
   | _ :: _, _ ->
       fail ()
+
+let m_list_with_dots ~less_is_ok f is_dots xsa xsb =
+  match xsa with
+  (* Optimization: [..., PAT, ...] *)
+  | [ start_dots; xa; end_dots ] when is_dots start_dots && is_dots end_dots ->
+      (* We just need to match PAT against every element in 'xsb'! *)
+      xsb |> List.fold_left (fun acc xb -> acc >||> f xa xb) (fail ())
+  | __else__ -> m_list_with_dots ~less_is_ok f is_dots xsa xsb
 
 let m_list_with_dots_and_metavar_ellipsis ~less_is_ok ~f ~is_dots
     ~is_metavar_ellipsis xsa xsb =
@@ -668,7 +705,7 @@ let m_comb_fold (m_comb : _ comb_matcher) (xs : _ list)
 let m_comb_1to1 (m : _ matcher) a bs : _ comb_result =
  fun tin ->
   bs |> all_elem_and_rest_of_list
-  |> List_.map_filter (fun (b, other_bs) ->
+  |> List_.filter_map (fun (b, other_bs) ->
          match m a b tin with
          | [] -> None
          | tout -> Some (Lazy.force other_bs, tout))
@@ -676,7 +713,7 @@ let m_comb_1to1 (m : _ matcher) a bs : _ comb_result =
 let m_comb_1toN m_1toN a bs : _ comb_result =
  fun tin ->
   bs |> all_splits
-  |> List_.map_filter (fun (l, r) ->
+  |> List_.filter_map (fun (l, r) ->
          match m_1toN a l tin with
          | [] -> None
          | tout -> Some (r, tout))
@@ -747,13 +784,13 @@ let adjust_info_remove_enclosing_quotes (s, info) =
        * this happens if the string is the result of constant folding. *)
       (s, info)
   | Ok loc -> (
-      let raw_str = loc.Tok.str in
+      let raw_str = loc.Loc.str in
       let re = Str.regexp_string s in
       try
         let pos = Str.search_forward re raw_str 0 in
         let loc =
           {
-            Tok.str = s;
+            Loc.str = s;
             pos =
               {
                 loc.pos with
@@ -766,7 +803,8 @@ let adjust_info_remove_enclosing_quotes (s, info) =
         (s, info)
       with
       | Not_found ->
-          logger#error "could not find %s in %s" s raw_str;
+          Log.debug (fun m ->
+              m "could not find %s in %s" s (String_.show ~max_len:100 raw_str));
           (* return original token ... better than failwith? *)
           (s, info))
 
@@ -779,7 +817,7 @@ let m_string_ellipsis_or_metavar_or_default ?(m_string_for_default = m_string) a
   (* dots: '...' on string *)
   | "..." -> return ()
   (* metavar: "$MVAR" *)
-  | astr when MV.is_metavar_name astr ->
+  | astr when Mvar.is_metavar_name astr ->
       let _, orig_info = b in
       let s, info = adjust_info_remove_enclosing_quotes b in
       envf a (MV.Text (s, info, orig_info))
@@ -794,7 +832,7 @@ let m_ellipsis_or_metavar_or_string a b =
   (* dots: '...' on string in atom/regexp/string *)
   | "..." -> return ()
   (* metavar: *)
-  | s when MV.is_metavar_name s ->
+  | s when Mvar.is_metavar_name s ->
       let str, info = b in
       envf a (MV.Text (str, info, info))
   | _ -> m_wrap m_string a b

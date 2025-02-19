@@ -1,3 +1,6 @@
+# coupling: if you modify this file from the pro repo, you'll have
+# to also update .dockerignore
+
 # dune
 _build/
 # starting from dune 2.8.2, those are actually not generated anymore
@@ -8,6 +11,9 @@ _build/
 # but we keep the one used for installing the project dependencies with
 # 'opam install --deps-only .':
 !/semgrep.opam
+
+# local opam switch
+_opam/
 
 # bisect_ppx
 _coverage/
@@ -96,7 +102,8 @@ instance/
 docs/_build/
 
 # PyBuilder
-target/
+#target/
+#pad: commented because we now have also src/target/ which is valid code
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -180,9 +187,17 @@ log_config.json
 
 # Ignore bench files
 perf/bench
-!perf/bench/dogfood
-!perf/bench/gitlab
-!perf/bench/dummy
+
+# The following instructions have no effect because 'perf/bench' is a parent
+# directory that is gitignored by the pattern above, causing git's scanner
+# to stop without inspecting the children paths.
+#
+# TODO: If we want to not gitignore these paths, they should
+# go in a separate folder i.e. not side-by-side with temporary folders.
+#
+# !perf/bench/dogfood
+# !perf/bench/gitlab
+# !perf/bench/dummy
 
 # Local actions testing
 act/
@@ -198,5 +213,9 @@ act/
 # Artifacts from CI
 scripts/release/release_body.txt
 
+# nix
+result
+# direnv
+.direnv
 # Personal symlink to semgrep-proprietary used by 'make pro'
 /semgrep-proprietary

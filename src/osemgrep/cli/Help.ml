@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2023 Semgrep Inc.
+ * Copyright (C) 2023-2024 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -24,13 +24,19 @@
  * message so this isn't too bad.
  *
  * LATER: add 'interactive' and 'test' new osemgrep-only
- * subcommands (not added yet to avoid regressions in tests/e2e/test_help.py).
+ * subcommands (not added yet to avoid regressions in
+ * tests/default/e2e/test_help.py).
+ *
+ * coupling: with https://semgrep.dev/docs/cli-reference#semgrep-commands
+ * updated automatically by update-help-command.yml in the semgrep-docs repo
  *)
 
 (*****************************************************************************)
 (* Entry point *)
 (*****************************************************************************)
 
+(* coupling: keep the summaries for the login/scan/ci subcommands similar
+   to what's printed by print_semgrep_dashdash_help. *)
 let print_help (stdout : Cap.Console.stdout) =
   (* TODO: add a Out.printf_color? *)
   CapConsole.ocolor_format_printf stdout
@@ -49,34 +55,38 @@ For more information about Semgrep, visit @{<cyan;ul>https://semgrep.dev@}
 
 @{<ul>Commands@}:
   @{<cyan>semgrep login@}                Enable Pro rules, Supply Chain, and secrets scanning
-  @{<cyan>semgrep ci@}                   Run Semgrep on the latest git diff (for use in CI)
-  @{<cyan>semgrep scan@}                 Run Semgrep rules on local directories or files
+  @{<cyan>semgrep ci@}                   Run Semgrep on a git diff (for use in CI)
+  @{<cyan>semgrep scan@}                 Run Semgrep rules on local folders or files
 
 @{<ul>Help@}:
   @{<cyan>semgrep COMMAND --help@}       For more information on each command
 
-For the CLI docs visit @{<cyan;ul>https://semgrep.dev/docs/category/semgrep-cli/@}
+For the CLI docs visit @{<cyan;ul>https://semgrep.dev/docs/cli-reference@}
 |}
 
+(* coupling: see above *)
 let print_semgrep_dashdash_help (stdout : Cap.Console.stdout) =
-  CapConsole.out stdout
-    {|Usage: semgrep [OPTIONS] COMMAND [ARGS]...
+  CapConsole.ocolor_format_printf stdout
+    {|@{<ul>Usage@}: @{<cyan>semgrep [OPTIONS] COMMAND [ARGS]...@}
 
-  To get started quickly, run `semgrep scan --config auto`
+  To get started quickly, run @{<cyan>`semgrep scan --config auto`@}
 
-  Run `semgrep SUBCOMMAND --help` for more information on each subcommand
+  Run @{<cyan>`semgrep SUBCOMMAND --help`@} for more information on each subcommand
 
-  If no subcommand is passed, will run `scan` subcommand by default
+  If no subcommand is passed, will run @{<cyan>`scan`@} subcommand by default
 
-Options:
+@{<ul>Options@}:
   -h, --help  Show this message and exit.
 
-Commands:
-  ci                   The recommended way to run semgrep in CI
-  install-semgrep-pro  Install the Semgrep Pro Engine
-  login                Obtain and save credentials for semgrep.dev
-  logout               Remove locally stored credentials to semgrep.dev
-  lsp                  Start the Semgrep LSP server (useful for IDEs)
-  publish              Upload rule to semgrep.dev
-  scan                 Run semgrep rules on files
-  show                 Show various information about Semgrep|}
+@{<ul>Commands@}:
+  @{<cyan>ci@}                   Run Semgrep on a git diff (for use in CI)
+  @{<cyan>install-semgrep-pro@}  Install the Semgrep Pro Engine
+  @{<cyan>login@}                Obtain and save credentials for @{<cyan;ul>semgrep.dev@}
+  @{<cyan>logout@}               Remove locally stored credentials to @{<cyan;ul>semgrep.dev@}
+  @{<cyan>lsp@}                  Start the Semgrep LSP server (useful for IDEs)
+  @{<cyan>publish@}              Upload rule to @{<cyan;ul>semgrep.dev@}
+  @{<cyan>scan@}                 Run Semgrep rules on local folders or files
+  @{<cyan>show@}                 Show various types of information
+  @{<cyan>test@}                 Test the rules (EXPERIMENTAL improvements over scan --test)
+  @{<cyan>validate@}             Validate the rules (EXPERIMENTAL improvements over scan --validate)
+|}

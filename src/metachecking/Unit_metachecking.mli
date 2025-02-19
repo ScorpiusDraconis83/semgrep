@@ -1,1 +1,1 @@
-val tests : unit -> Alcotest_ext.test list
+val tests : < Core_scan.caps ; Cap.readdir ; .. > -> Testo.t list

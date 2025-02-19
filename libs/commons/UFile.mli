@@ -1,24 +1,30 @@
 (*
    Operations on files in the general sense (regular file, folder, etc.).
 
-   Migration note:
-   - step 1: here, we expose the same functions as in Common but using the
-             Fpath.t type.
-   - step 2: move the original implementation from Common.ml to here
-             and stop using 'string' for file paths.
+   As opposed to Fpath.ml, which is purely syntactical, the functions below
+   actually relies on the filesystem.
+
+   TODO: you should use the capability-aware functions in CapFS.ml
+   instead of the functions in this unsafe (hence the U prefix) module.
 *)
 
-(* For realpath, use Unix.realpath in OCaml >= 4.13, or Rpath.mli *)
-(*
-   Check that the file exists and produce a valid absolute path for the file.
-*)
-val fullpath : Fpath.t -> Fpath.t
+(*****************************************************************************)
+(* Paths *)
+(*****************************************************************************)
 
-(* use the command 'find' internally and tries to skip files in
+(* ugly: internal flag for files_of_dir_or_files_no_vcs_nofilter *)
+val follow_symlinks : bool ref
+
+(* list recursively files in a directory and tries to skip files in
  * version control system (vcs) (e.g., .git, _darcs, etc.).
- * Deprecated?
+ *
+ * strict: fail hard (Invalid_argument exception) if the paths given
+ * as arguments don't exist.
+ *
+ * DEPRECATED: use instead paths/List_files.mli
  *)
-val files_of_dirs_or_files_no_vcs_nofilter : Fpath.t list -> Fpath.t list
+val files_of_dirs_or_files_no_vcs_nofilter :
+  < Cap.readdir ; .. > -> ?strict:bool -> Fpath.t list -> Fpath.t list
 
 (*****************************************************************************)
 (* IO *)
@@ -30,18 +36,22 @@ val files_of_dirs_or_files_no_vcs_nofilter : Fpath.t list -> Fpath.t list
 *)
 val cat : Fpath.t -> string list
 
-(* this is 1-based access, line 1 is at res.[1] *)
+(* this is 1-based access, line 1 is at res.[1]
+ * (res.[0] is a fake empty string)
+ *)
 val cat_array : Fpath.t -> string array
-val write_file : Fpath.t -> string -> unit
+val write_file : file:Fpath.t -> string -> unit
 
 (* [lines_of_file (start_line, end_line) file] returns
- * the list of lines from start_line to end_line included.
+ * the list of lines from start_line to end_line included
+ * or an error message (for example in case of out of bounds access).
  *
  * Note that the returned lines do not contain \n.
+ * Note also that line numbers are 1-based.
  *
  * This function is slow, you should not use it!
  *)
-val lines_of_file : int * int -> Fpath.t -> string list
+val lines_of_file : int * int -> Fpath.t -> (string list, string) result
 
 (* Read the contents of file.
 
@@ -56,30 +66,24 @@ val lines_of_file : int * int -> Fpath.t -> string list
 *)
 val read_file : ?max_len:int -> Fpath.t -> string
 
-(* If the file is a named pipe (e.g., created with <(echo 'foo')), copy it
-   into a temporary regular file (with prefix [prefix]) and return the path
-   of that temporary file. This allows multiple reads on the file and
-   avoids illegal seeks when reporting match results or parsing errors.
-   The temporary file is deleted at_exit.
-*)
-val replace_named_pipe_by_regular_file_if_needed :
-  ?prefix:string -> Fpath.t -> Fpath.t
-
 (* Scheme-inspired combinators that automatically close the file
  * once the function callback is done. Here is an example of use:
  *   with_open_outfile "/tmp/foo.txt" (fun (pr, _chan) ->
  *     pr "this goes in foo.txt"
  *   )
  *)
-val with_open_out : Fpath.t -> ((string -> unit) * out_channel -> 'a) -> 'a
-val with_open_in : Fpath.t -> (in_channel -> 'a) -> 'a
+val with_open_out :
+  ?make_ancestors:bool ->
+  Fpath.t ->
+  ((string -> unit) * out_channel -> 'a) ->
+  'a
+(** [with_open_out ~make_ancestors path f] opens, creating if necessary, [path]
+    and applies [f] to the resulting [out_channel].
 
-(* creation of /tmp files, a la gcc
- * ex: new_temp_file "cocci" ".c" will give "/tmp/cocci-3252-434465.c"
- *)
-val new_temp_file : string (* prefix *) -> string (* suffix *) -> Fpath.t
-val erase_temp_files : unit -> unit
-val erase_this_temp_file : Fpath.t -> unit
+    If [make_ancestors] is specified and true, it creates any necessary
+    ancestory directories too. *)
+
+val with_open_in : Fpath.t -> (in_channel -> 'a) -> 'a
 
 val find_first_match_with_whole_line :
   Fpath.t -> ?split:char -> string -> string option
@@ -99,17 +103,89 @@ val find_first_match_with_whole_line :
 (*****************************************************************************)
 (* File properties *)
 (*****************************************************************************)
+
+(* Check if the file is executable by others or by the group.
+   If the file is only executable by the user owning the file ('u'),
+   this function reports it as not executable.
+   For example, the following commands create a file that's executable by its
+   owner (and by root) on which is_executable fails:
+
+     echo > foo
+     chmod 700 foo
+     ./foo && echo 'success'
+
+   TODO: is this intentional? Please explain.
+*)
 val is_executable : Fpath.t -> bool
 val filesize : Fpath.t -> int
 val filemtime : Fpath.t -> float
 
-(* raise Unix_error if the directory does not exist *)
-val is_directory : Fpath.t -> bool
+(*
+   Functions for testing whether a file exists and is of the expected kind,
+   without raising exceptions.
 
-(* raise Unix_error if the file does not exist *)
-val is_file : Fpath.t -> bool
-val is_symlink : Fpath.t -> bool
-val lfile_exists : Fpath.t -> bool
+   The goal is to deal with the 3 common file types (dir, reg, lnk)
+   and focus only on files that are usable. If a file is not usable
+   due for example to missing permissions, all these functions will return a
+   negative answer ('false') rather than raising an exception.
+   A design principle is "make common tasks easy and uncommon tasks possible".
+   Here, we're focusing on the former.
 
-(* no raised Unix_error if the directory does not exist *)
-val dir_exists : Fpath.t -> bool
+   dir = directory = folder
+   reg = regular files
+   lnk = symbolic link
+
+   The functions whose name contains 'lnk' never follow symlinks.
+
+   For more exotic file kinds or for classifying files by kind,
+   use UUnix.stat or UUnix.lstat directly.
+*)
+val is_dir : follow_symlinks:bool -> Fpath.t -> bool
+val is_reg : follow_symlinks:bool -> Fpath.t -> bool
+val is_lnk : Fpath.t -> bool
+val is_dir_or_reg : follow_symlinks:bool -> Fpath.t -> bool
+val is_dir_or_lnk : Fpath.t -> bool
+val is_lnk_or_reg : Fpath.t -> bool
+val is_dir_or_lnk_or_reg : Fpath.t -> bool
+
+(* Turn a file kind into a JSON string node and vice-versa *)
+val file_kind_to_yojson : Unix.file_kind -> Yojson.Safe.t
+val file_kind_of_yojson : Yojson.Safe.t -> (Unix.file_kind, string) result
+
+(*****************************************************************************)
+(* Filesystem manipulation *)
+(*****************************************************************************)
+(* Makes the given directory as well as its parent directories.
+ * Raises Unix_error if A non-directory object with the same name exists.
+ *)
+val make_directories : Fpath.t -> unit
+
+(*****************************************************************************)
+(* Legacy API using 'string' for filenames instead of Fpath.t *)
+(*****************************************************************************)
+
+(* Deprecated! *)
+module Legacy : sig
+  val files_of_dirs_or_files_no_vcs_nofilter :
+    < Cap.readdir ; .. > ->
+    ?strict:bool ->
+    string (* root *) list ->
+    string (* filename *) list
+
+  val cat : string (* filename *) -> string list
+  val write_file : file:string (* filename *) -> string -> unit
+  val read_file : ?max_len:int -> string (* filename *) -> string
+
+  val with_open_outfile :
+    string (* filename *) -> ((string -> unit) * out_channel -> 'a) -> 'a
+
+  val with_open_infile : string (* filename *) -> (in_channel -> 'a) -> 'a
+
+  (* NOT IN MAIN API *)
+  val dir_contents :
+    < Cap.readdir ; .. > ->
+    ?strict:bool ->
+    string (* filename *) ->
+    string (* filename *) list
+  (** [dir_contents dir] will return a recursive list of all files in a dir *)
+end

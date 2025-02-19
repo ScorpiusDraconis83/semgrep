@@ -188,8 +188,10 @@ and map_string_content env v = (map_list (map_wrap map_string)) env v
 
 and map_special _env v =
   match v with
-  | Self -> fun tk -> G.IdSpecial (G.Self, tk) |> G.e
-  | Super -> fun tk -> G.IdSpecial (G.Super, tk) |> G.e
+  | Self ->
+      fun tk -> G.N (G.IdSpecial ((G.Self, tk), G.empty_id_info ())) |> G.e
+  | Super ->
+      fun tk -> G.N (G.IdSpecial ((G.Super, tk), G.empty_id_info ())) |> G.e
   | Dollar -> fun tk -> G.N (G.Id (("$", tk), G.empty_id_info ())) |> G.e
 
 and map_argument env v : G.argument =
@@ -295,7 +297,7 @@ and map_bind env v : G.definition =
       let _teq = map_tok env v2 in
       let e = map_expr env v3 in
       let ent = G.basic_entity id in
-      let def = G.VarDef { G.vinit = Some e; vtype = None } in
+      let def = G.VarDef { G.vinit = Some e; vtype = None; vtok = G.no_sc } in
       (ent, def)
 
 and map_function_definition env v : G.function_definition =
@@ -348,7 +350,7 @@ and map_obj_member env v : G.field =
       G.F stmt
   | OEllipsis v ->
       let tdots = map_tok env v in
-      G.fieldEllipsis tdots
+      G.field_ellipsis tdots
 
 and map_field env v : G.definition =
   let { fld_name; fld_attr; fld_hidden; fld_value } = v in
@@ -356,9 +358,11 @@ and map_field env v : G.definition =
   let _fld_attrTODO = (map_option map_attribute) env fld_attr in
   let _fld_hiddenTODO = (map_wrap map_hidden) env fld_hidden in
   let fld_value = map_expr env fld_value in
-  let ent = { G.name = entname; tparams = []; attrs = [] } in
+  let ent = { G.name = entname; tparams = None; attrs = [] } in
   (* alt? FldDefColon? *)
-  let def = G.VarDef { G.vinit = Some fld_value; vtype = None } in
+  let def =
+    G.VarDef { G.vinit = Some fld_value; vtype = None; vtok = G.no_sc }
+  in
   (ent, def)
 
 and map_field_name env v : G.entity_name =
@@ -400,8 +404,8 @@ and map_obj_comprehension env v =
     let _tcolon = map_tok env v2 in
     let e = map_expr env v3 in
     let entname = G.EDynamic e1 in
-    let ent = { G.name = entname; tparams = []; attrs = [] } in
-    let def = G.VarDef { G.vinit = Some e; vtype = None } in
+    let ent = { G.name = entname; tparams = None; attrs = [] } in
+    let def = G.VarDef { G.vinit = Some e; vtype = None; vtok = G.no_sc } in
     (ent, def)
   in
   let def, for_if_comps = (map_comprehension2 map_tuple) env oc_comp in

@@ -1,6 +1,8 @@
 import os
+import re
 import subprocess
 import tempfile
+import urllib
 from contextlib import contextmanager
 from pathlib import Path
 from textwrap import dedent
@@ -29,7 +31,10 @@ def zsplit(s: str) -> List[str]:
         return []
 
 
-def git_check_output(command: Sequence[str], cwd: Optional[str] = None) -> str:
+def git_check_output(
+    command: Sequence[str],
+    cwd: Optional[str] = None,
+) -> str:
     """
     Helper function to run a GIT command that prints out helpful debugging information
     """
@@ -63,6 +68,8 @@ def git_check_output(command: Sequence[str], cwd: Optional[str] = None) -> str:
 
                 - the git binary is not available
                 - the current working directory is not a git repository
+                - the baseline commit is not a parent of the current commit
+                    (if you are running through semgrep-app, check if you are setting `SEMGREP_BRANCH` or `SEMGREP_BASELINE_COMMIT` properly)
                 - the current working directory is not marked as safe
                     (fix with `git config --global --add safe.directory $(pwd)`)
 
@@ -74,18 +81,33 @@ def git_check_output(command: Sequence[str], cwd: Optional[str] = None) -> str:
 
 def get_project_url() -> Optional[str]:
     """
-    Returns the current git project's default remote URL, or None if not a git project / no remote
+    Returns the current git project's default remote URL, or None if not a git project / no remote.
+    NOTE: We need to ensure that we clean the URL to remove any credentials as Gitlab includes
+    a token in the URL (e.g.`https://gitlab-ci-token):${CI_JOB_TOKEN}@gitlab.example.com/<namespace>/<project>`)
+    which is sensitive information that we should not expose.
     """
+    project_url = None
     try:
-        return git_check_output(["git", "ls-remote", "--get-url"])
+        project_url = git_check_output(["git", "ls-remote", "--get-url"])
     except Exception as e:
         logger.debug(f"Failed to get project url from 'git ls-remote': {e}")
         try:
             # add \n to match urls from git ls-remote (backwards compatibility)
-            return manually_search_file(".git/config", ".com", "\n")
+            project_url = manually_search_file(".git/config", ".com", "\n")
         except Exception as e:
             logger.debug(f"Failed to get project url from .git/config: {e}")
             return None
+    return clean_project_url(project_url) if project_url else None
+
+
+def clean_project_url(url: str) -> str:
+    """
+    Returns a clean version of a git project's URL, removing credentials if present
+    """
+    parts = urllib.parse.urlsplit(url)
+    clean_netloc = re.sub("^.*:.*@(.+)", r"\1", parts.netloc)
+    parts = parts._replace(netloc=clean_netloc)
+    return urllib.parse.urlunsplit(parts)
 
 
 def get_git_root_path() -> Path:
@@ -93,6 +115,33 @@ def get_git_root_path() -> Path:
     root_path = Path(git_output)
     logger.debug(f"Git root path: {root_path}")
     return root_path
+
+
+def is_git_repo_root_approx() -> bool:
+    """
+    Sanity check if the current directory is the root of a git repo.
+    Will not raise an exception, though it may give false positives.
+    This function is meant to help provide better warning messages
+    (e.g. for `semgrep ci`).
+    """
+    return os.path.exists(".git/")
+
+
+def is_git_repo_empty() -> bool:
+    """
+    Checks if the repo is empty.
+    """
+    # Run git status to cover most common edge cases i.e that the
+    # - Git binary is available
+    # - cwd is a git repository
+    # - cwd is marked safe
+    git_check_output(["git", "status"])
+    try:
+        # This command should only fail in the case that HEAD is empty
+        git_check_output(["git", "rev-parse", "HEAD"])
+        return False
+    except Exception:
+        return True
 
 
 class GitStatus(NamedTuple):
@@ -121,9 +170,10 @@ class BaselineHandler:
     """
     base_commit: Git ref to compare against
 
-    is_mergebase: Is it safe to assume that the given commit is the mergebase?
-    If not, we have to compute the mergebase ourselves, which can be impossible
-    on shallow checkouts.
+    is_mergebase: Is it safe to assume that the given commit is the merge base?
+    If not, we have to compute the merge base ourselves, which can be impossible
+    on shallow checkouts. A merge base is the most recent common ancestor
+    between two commits.
     """
 
     def __init__(self, base_commit: str, is_mergebase: bool = False) -> None:
@@ -144,6 +194,9 @@ class BaselineHandler:
             raise Exception(
                 f"Error initializing baseline. While running command {e.cmd} received non-zero exit status of {e.returncode}.\n(stdout)->{e.stdout}\n(strerr)->{e.stderr}"
             )
+
+    def base_commit(self) -> str:
+        return self._base_commit
 
     def _get_git_status(self) -> GitStatus:
         """
@@ -178,6 +231,8 @@ class BaselineHandler:
                 cmd = status_cmd
             else:
                 cmd = [*status_cmd, "--merge-base"]
+            # -- is a sentinel to avoid ambiguity between branch and file names
+            cmd += ["--"]
             # nosemgrep: python.lang.security.audit.dangerous-subprocess-use.dangerous-subprocess-use
             raw_output = subprocess.run(
                 cmd,
@@ -192,6 +247,8 @@ class BaselineHandler:
                 logger.warn(
                     "git could not find a single branch-off point, so we will compare the baseline commit directly"
                 )
+                # -- is a sentinel to avoid ambiguity between branch and file names
+                status_cmd += ["--"]
                 # nosemgrep: python.lang.security.audit.dangerous-subprocess-use.dangerous-subprocess-use
                 raw_output = subprocess.run(
                     status_cmd,
@@ -226,6 +283,15 @@ class BaselineHandler:
 
             path = Path(fname)
 
+            # Skip the file if it's a broken symlink.
+            # Hypothesis: paths to files that don't exist are possible if the file was renamed,
+            # and they're needed to track semgrep findings in spite of file renames.
+            if path.is_symlink() and not os.access(path, os.R_OK):
+                logger.verbose(
+                    f"| Skipping broken symlink: {path}",
+                )
+                continue
+            # TODO: shouldn't we skip all symlinks?
             if path.is_symlink() and path.is_dir():
                 logger.verbose(
                     f"| Skipping {path} since it is a symlink to a directory: {path.resolve()}",
@@ -263,6 +329,33 @@ class BaselineHandler:
             return self._base_commit
         else:
             return git_check_output(["git", "merge-base", self._base_commit, "HEAD"])
+
+    def _remove_worktree_with_check(self, worktree_dir: str) -> None:
+        # To help clean up a worktree in a `finally` clause
+        # In most cases, if `git worktree add` fails, we should get
+        # an error anyway, but there's no point in cleaning up a
+        # worktree that we know doesn't exist and this prevents us
+        # from failing if we get an unusual error
+        logger.debug("Checking that the worktree exists")
+        # nosemgrep: use-git-check-output-helper - we should continue when this fails
+        res = subprocess.run(["git", "worktree", "list"], capture_output=True)
+        list_stdout = res.stdout.decode() if res.stdout else "<No stdout>"
+        list_stderr = res.stderr.decode() if res.stderr else "<No stderr>"
+        if res.returncode != 0:
+            logger.debug(
+                f"Error running `git worktree list`:\n----stdout----\n{list_stdout}\n----stderr:----\n{list_stderr}\n`git worktree list` is invoked via a subprocess, this should not be possible"
+            )
+        else:
+            if worktree_dir in list_stdout.strip():
+                logger.debug("Removing the worktree")
+                # nosemgrep: use-git-check-output-helper - we should continue when this fails
+                res = subprocess.run(["git", "worktree", "remove", worktree_dir])
+                remove_stdout = res.stdout.decode() if res.stdout else "<No stdout>"
+                remove_stderr = res.stderr.decode() if res.stderr else "<No stdout>"
+                if res.returncode != 0:
+                    logger.debug(
+                        f"Error cleaning up the git worktree via `git worktree remove`:\n----stdout:---\n{remove_stdout}\n----stderr:----\n{remove_stderr}\n-----git worktree list output\n{list_stdout}"
+                    )
 
     @contextmanager
     def baseline_context(self) -> Iterator[None]:
@@ -316,9 +409,9 @@ class BaselineHandler:
                 yield
             finally:
                 os.chdir(cwd)
-                logger.debug("Cleaning up git worktree")
-                # Remove the working tree
-                git_check_output(["git", "worktree", "remove", tmpdir])
+                # Cleanup the worktree
+                logger.debug("Cleaning up the worktree")
+                self._remove_worktree_with_check(tmpdir)
                 logger.debug("Finished cleaning up git worktree")
 
     def print_git_log(self) -> None:

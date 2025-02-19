@@ -9,6 +9,7 @@ from typing import Optional
 from typing import Tuple
 from typing import TypeVar
 
+import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semdep.external.parsy import alt
 from semdep.external.parsy import Parser
 from semdep.external.parsy import regex
@@ -21,7 +22,7 @@ from semdep.parsers.util import safe_parse_lockfile_and_manifest
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Direct
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
 from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
-from semgrep.semgrep_interfaces.semgrep_output_v1 import GoMod
+from semgrep.semgrep_interfaces.semgrep_output_v1 import Fpath
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Gomod
 from semgrep.semgrep_interfaces.semgrep_output_v1 import ScaParserName
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Transitive
@@ -77,7 +78,7 @@ def parse_go_mod(
     lockfile_path: Path, manifest_path: Optional[Path]
 ) -> Tuple[List[FoundDependency], List[DependencyParserError]]:
     parsed_lockfile, parsed_manifest, errors = safe_parse_lockfile_and_manifest(
-        DependencyFileToParse(lockfile_path, go_mod, ScaParserName(GoMod())), None
+        DependencyFileToParse(lockfile_path, go_mod, ScaParserName(out.PGoMod())), None
     )
     if not parsed_lockfile:
         return [], errors
@@ -104,6 +105,10 @@ def parse_go_mod(
                             ),
                             line_number=line_number,
                             resolved_url=package,  # Go package names are URLs
+                            lockfile_path=Fpath(str(lockfile_path)),
+                            manifest_path=Fpath(str(manifest_path))
+                            if manifest_path
+                            else None,
                         )
                     )
     return [d for d in output if (d.package, d.version) not in exclude], errors

@@ -7,6 +7,8 @@ type autofix_printer_test_case = {
   expected : string;
 }
 
+let t = Testo.create
+
 (* Test suite for the autofix printers.
  *
  * This runs Semgrep to get a pattern match, then renders the fix. However, it
@@ -32,9 +34,8 @@ type autofix_printer_test_case = {
  * fixes tested there are correct.
  *)
 let check lang { target; pattern; fix_pattern; expected } =
-  let ext = List_.hd_exn "unexpected empty list" (Lang.ext_of_lang lang) in
-  Common2.with_tmp_file ~str:target ~ext (fun target_file ->
-      let target_file = Fpath.v target_file in
+  let ext = List_.hd_exn "unexpected empty list" (Lang.exts_of_lang lang) in
+  UTmp.with_temp_file ~contents:target ~suffix:("." ^ ext) (fun target_file ->
       let matches =
         Unit_engine.match_pattern ~lang
           ~hook:(fun _ -> ())
@@ -51,7 +52,11 @@ let check lang { target; pattern; fix_pattern; expected } =
                  "wrong number of matches for `%s`. expected exactly 1, got %d"
                  target (List.length lst))
       in
-      let fix_pattern_ast = Parse_pattern.parse_pattern lang fix_pattern in
+      let fix_pattern_ast =
+        match Parse_pattern.parse_pattern lang fix_pattern with
+        | Ok x -> x
+        | Error s -> failwith (spf "Failed to parse %s: %s" fix_pattern s)
+      in
       let metavars = match_.env in
       let fixed_pattern_ast =
         match
@@ -78,9 +83,9 @@ let check lang { target; pattern; fix_pattern; expected } =
       in
       (* Replace the fake target contents with the rendered fix *)
       let start, end_ =
-        let start, end_ = match_.Pattern_match.range_loc in
-        let _, _, end_charpos = Tok.end_pos_of_loc end_ in
-        (start.Tok.pos.bytepos, end_charpos)
+        let start, end_ = match_.range_loc in
+        let _, _, end_charpos = Loc.end_pos end_ in
+        (start.Loc.pos.bytepos, end_charpos)
       in
       let full_fixed_text =
         let before = Str.first_chars fake_target_contents start in
@@ -150,8 +155,8 @@ let test_python_autofix_printer () =
 let test_js_autofix_printer () = List.iter (check Lang.Js) polyglot_test_cases
 
 let tests =
-  Alcotest_ext.pack_tests "autofix printer"
+  Testo.categorize "autofix printer"
     [
-      ("test python autofix printer", test_python_autofix_printer);
-      ("test js autofix printer", test_js_autofix_printer);
+      t "test python autofix printer" test_python_autofix_printer;
+      t "test js autofix printer" test_js_autofix_printer;
     ]

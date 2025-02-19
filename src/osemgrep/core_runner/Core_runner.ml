@@ -1,7 +1,6 @@
 open Common
-open Fpath_.Operators
-module OutJ = Semgrep_output_v1_t
 module Env = Semgrep_envvars
+module Out = Semgrep_output_v1_t
 
 (*************************************************************************)
 (* Prelude *)
@@ -17,7 +16,11 @@ module Env = Semgrep_envvars
 (* Types *)
 (*************************************************************************)
 
-(* input *)
+(* input
+ * LATER: ideally we can cleanup Core_scan_config.ml enough that we don't
+ * need this extra type can can just reuse Core_scan_config.t as is.
+ * TODO: At least factorize some of it like the opti/limits
+ *)
 type conf = {
   (* opti and limits *)
   num_jobs : int;
@@ -25,55 +28,81 @@ type conf = {
   max_memory_mb : int;
   timeout : float;
   timeout_threshold : int; (* output flags *)
+  (* features *)
+  (* TODO: move nosem in Scan_CLI.conf and handled it Scan_subcommand.ml.
+   * Core_scan does not use nosem anymore, or more precisely it always
+   * have nosem=true and return findings with ignore=false and assume
+   * the caller will handle the ignored findings.
+   *)
   nosem : bool;
   strict : bool;
+  (* useful for debugging rules *)
   time_flag : bool;
   matching_explanations : bool;
   (* TODO: actually seems like semgrep-core always return them,
    * even if it was not requested by the CLI
    *)
   dataflow_traces : bool;
-  (* osemgrep-only: *)
-  ast_caching : bool;
+  (* set by the scan config from the app *)
+  symbol_analysis : bool;
 }
 [@@deriving show]
 
-(* output *)
-(* LATER: ideally we should just return Core_result.t
-   without the need for the intermediate Out.core_output.
-*)
-type result = {
-  (* ocaml: not in original python implem, but just enough to get
-   * Semgrep_scan.cli_output_of_core_results to work
-   *)
-  core : OutJ.core_output;
-  hrules : Rule.hrules;
-  scanned : Fpath.t Set_.t;
-      (* in python implem *)
-      (* TODO: original intermediate data structures in python *)
-      (*
-     findings_by_rule : (Rule.t, Rule_match.t list) Map_.t;
-     errors : Error.t list;
-     all_targets: path Set_.t;
-     (*profiling_data: profiling_data; TOPORT: do we need to translate this? *)
-     parsing_data : Parsing_data.t;
-     explanations : Out.matching_explanation list option;
-  *)
+type pro_conf = {
+  diff_config : Differential_scan_config.t;
+  (* TODO: change to root: Fpath.t, like in Deep_scan_config.interfile_config *)
+  roots : Scanning_root.t list;
+  engine_type : Engine_type.t;
 }
 
-(* Type for the scan function, which can either be built by
-   mk_scan_func_for_osemgrep() or set in Scan_subcommand.hook_pro_scan_func *)
+(* output *)
+type result = Core_runner_result.t
 
-type scan_func_for_osemgrep =
-  ?respect_git_ignore:bool ->
-  ?file_match_results_hook:
-    (Fpath.t -> Core_result.matches_single_file -> unit) option ->
-  conf ->
-  (* LATER? use Config_resolve.rules_and_origin instead? *)
-  Rule.rules ->
-  Rule.invalid_rule_error list ->
-  Fpath.t list ->
-  Core_result.result_or_exn
+(* Type for the scan function, which can either be built by
+   mk_core_run_for_osemgrep() or set in Scan_subcommand.hook_pro_scan_func
+
+   This is a record in an attempt to produce clearer error messages than
+   with a type alias.
+
+   It doesn't scan the filesystem since it takes a list of target files,
+   not scanning roots.
+*)
+type func = {
+  run :
+    ?file_match_hook:(Fpath.t -> Core_result.matches_single_file -> unit) ->
+    conf ->
+    (* TODO alt: pass a bool alongside each target path that indicates whether
+       the target is explicit i.e. occurs directly on the command line *)
+    Find_targets.conf ->
+    (* LATER? alt: use Config_resolve.rules_and_origin instead? *)
+    Rule_error.rules_and_invalid ->
+    (* Takes a list of target files, not scanning roots. *)
+    Fpath.t list ->
+    Core_result.result_or_exn;
+}
+
+let default_conf : conf =
+  {
+    (* Maxing out number of cores used to 16 if more not requested to
+     * not overload on large machines.
+     * Also, hardcode num_jobs to 1 for non-unix (i.e. Windows) because
+     * we don't believe that Parmap works in those environments
+     * TODO: figure out a solution for Windows multi-processing (OCaml 5 in
+     * the worst case)
+     *)
+    num_jobs = min 16 (if Sys.unix then Parmap_.get_cpu_count () else 1);
+    timeout = 5.0;
+    (* ^ seconds, keep up-to-date with User_settings.ml and constants.py *)
+    timeout_threshold = 3;
+    max_memory_mb = 0;
+    optimizations = true;
+    dataflow_traces = false;
+    matching_explanations = false;
+    time_flag = false;
+    nosem = true;
+    strict = false;
+    symbol_analysis = false;
+  }
 
 (*****************************************************************************)
 (* To run a Pro scan (Deep scan and multistep scan) *)
@@ -91,105 +120,42 @@ type scan_func_for_osemgrep =
  * and executed by osemgrep-pro. When linked from osemgrep-pro, this
  * hook below will be set.
  *)
-let (hook_pro_scan_func_for_osemgrep :
-      (Fpath.t list ->
-      ?diff_config:Differential_scan_config.t ->
-      Engine_type.t ->
-      scan_func_for_osemgrep)
-      option
-      ref) =
-  ref None
+let hook_mk_pro_core_run_for_osemgrep : (pro_conf -> func) option Hook.t =
+  Hook.create None
+
+(* This hooks into the proprietary part of Semgrep, in order to access a
+ * function that helps us quickly checkout and scan a remote git repo.
+ * If a repo is checked out sparsely, this will only checkout the files
+ * that are needed for the scan.
+ *)
+let hook_pro_git_remote_scan_setup : (func -> func) option Hook.t =
+  Hook.create None
+
+(* TODO: find a way to make it a Core_scan hook instead of osemgrep one *)
+let hook_adjust_targets = Hook.create (fun _paths targets -> targets)
 
 (*************************************************************************)
-(* Extract mode *)
+(* Metrics and reporting *)
 (*************************************************************************)
-
-(* TODO? move to Xlang.ml? *)
-module XlangSet = Set.Make (struct
-  let compare
-      (* This only compares the first language in the case of `L (lang :: _)`.
-         That should be fine because for the use of Xlang in this file,
-         `L _` should always be flattened out *)
-        a b =
-    String.compare (Xlang.to_string a) (Xlang.to_string b)
-
-  type t = Xlang.t
-end)
-
-(* Extract mode: we need to make sure to include rules that will apply
-   to targets that have been extracted. To do that, we'll detect the languages
-   that targets might be extracted to and include them in the jobs *)
-(* TODO it would be nicer to just extract the targets before splitting jobs,
-   but that would cause us to change things for the Core_scan shared path *)
-let detect_extract_languages all_rules =
-  all_rules
-  |> List.fold_left
-       (fun acc { Rule.mode; _ } ->
-         match mode with
-         | `Extract { Rule.dst_lang; _ } -> XlangSet.add dst_lang acc
-         | _ -> acc)
-       XlangSet.empty
+let report_status_and_add_metrics_languages ~respect_gitignore
+    (lang_jobs : Lang_job.t list) (rules : Rule.t list) (targets : Fpath.t list)
+    =
+  Logs.app (fun m ->
+      m "%s"
+        (* TODO: validate if target is actually within a git repo and
+           perhaps set respect_git_ignore to false otherwise *)
+        (Text_reports.scan_status ~num_rules:(List.length rules)
+           ~num_targets:(List.length targets) ~respect_gitignore lang_jobs));
+  lang_jobs
+  |> List.iter (fun { Lang_job.analyzer; _ } ->
+         Metrics_.add_feature "language" (Analyzer.to_string analyzer));
+  ()
 
 (*************************************************************************)
-(* Helpers *)
+(* Input/output adapters to Core_scan input/output *)
 (*************************************************************************)
 
-(* The same rule may appear under multiple target languages because
-   some patterns can be interpreted in multiple languages.
-   TODO? could use Common.group_by
-*)
-let group_rules_by_target_language rules : (Xlang.t * Rule.t list) list =
-  (* target language -> rules *)
-  let tbl = Hashtbl.create 100 in
-  rules
-  |> List.iter (fun (rule : Rule.t) ->
-         let pattern_lang = rule.target_analyzer in
-         let target_langs = Xlang.flatten pattern_lang in
-         target_langs
-         |> List.iter (fun lang ->
-                let rules =
-                  match Hashtbl.find_opt tbl lang with
-                  | None -> []
-                  | Some rules -> rules
-                in
-                Hashtbl.replace tbl lang (rule :: rules)));
-  Hashtbl.fold (fun lang rules acc -> (lang, rules) :: acc) tbl []
-
-let add_typescript_to_javascript_rules_hack (all_rules : Rule.t list) :
-    Rule.t list =
-  (* If Javascript is one of the rule languages, we should also run on
-     Typescript files. This implementation mimics the hack in `rule.py`.
-     We could alternatively set this by changing lang.json, but we should
-     be careful to do that without affecting other things like the docs *)
-  all_rules
-  |> List_.map (fun r ->
-         match r.Rule.target_analyzer with
-         | LRegex
-         | LSpacegrep
-         | LAliengrep ->
-             r
-         | L (l, ls) ->
-             let lset = Set_.of_list ls in
-             let lset =
-               if l =*= Language.Js || Set_.mem Language.Js lset then
-                 Set_.add Language.Ts lset
-               else lset
-             in
-             { r with Rule.target_analyzer = L (l, lset |> Set_.elements) })
-
-let split_jobs_by_language all_rules all_targets : Lang_job.t list =
-  let all_rules = add_typescript_to_javascript_rules_hack all_rules in
-  let extract_languages = detect_extract_languages all_rules in
-  all_rules |> group_rules_by_target_language
-  |> List_.map_filter (fun (xlang, rules) ->
-         let targets =
-           all_targets
-           |> List.filter (Filter_target.filter_target_for_xlang xlang)
-         in
-         if List_.null targets && not (XlangSet.mem xlang extract_languages)
-         then None
-         else Some ({ xlang; targets; rules } : Lang_job.t))
-
+(* input adapter to Core_scan.scan *)
 let core_scan_config_of_conf (conf : conf) : Core_scan_config.t =
   match conf with
   | {
@@ -198,85 +164,49 @@ let core_scan_config_of_conf (conf : conf) : Core_scan_config.t =
    timeout_threshold;
    max_memory_mb;
    optimizations;
-   ast_caching;
    matching_explanations;
-   nosem;
+   nosem = _TODO;
    strict;
+   time_flag;
    (* TODO *)
-   time_flag = _;
    dataflow_traces = _;
+   symbol_analysis;
   } ->
-      (* We default to Json because we do not want the current text
-       * displayed in semgrep-core, and we don't want either the
-       * current semgrep-core incremental matches text output.
-       *)
-      let output_format = Core_scan_config.Json false (* no dots *) in
+      (* We do our own output in osemgrep, no need for Core_scan.scan() output *)
+      let output_format = Core_scan_config.NoOutput in
       let filter_irrelevant_rules = optimizations in
-      let parsing_cache_dir =
-        if ast_caching then Some (!Env.v.user_dot_semgrep_dir / "cache" / "asts")
-        else None
-      in
       {
-        Core_scan_config.default with
         ncores = num_jobs;
         output_format;
         timeout;
         timeout_threshold;
         max_memory_mb;
         filter_irrelevant_rules;
-        parsing_cache_dir;
         matching_explanations;
-        nosem;
         strict;
-        version = Version.version;
+        report_time = time_flag;
+        (* set later in mk_core_run_for_osemgrep *)
+        target_source = Targets [];
+        rule_source = Rules [];
+        file_match_hook = None;
+        (* same than in Core_scan_config.default
+         * alt: we could use a 'Core_scan_config.default with ...' but better
+         * to list all the fields.
+         *)
+        equivalences_file = None;
+        respect_rule_paths = true;
+        max_match_per_file = Core_scan_config.default.max_match_per_file;
+        tracing = None;
+        symbol_analysis;
       }
 
-let prepare_config_for_core_scan (config : Core_scan_config.t)
-    (lang_jobs : Lang_job.t list) =
-  let target_mappings_of_lang_job (x : Lang_job.t) :
-      Input_to_core_t.target list * Rule.rules =
-    let target_mappings =
-      x.targets
-      |> List_.map (fun (path : Fpath.t) : Input_to_core_t.target ->
-             { path = !!path; analyzer = x.xlang; products = Product.all })
-    in
-    (target_mappings, x.rules)
-  in
-  let target_mappings, rules =
-    lang_jobs
-    |> List.fold_left
-         (fun (acc_mappings, acc_rules) lang_job ->
-           let mappings, rules = target_mappings_of_lang_job lang_job in
-           (mappings :: acc_mappings, List.rev rules :: acc_rules))
-         ([], [])
-  in
-  let target_mappings = List.concat target_mappings in
-  let rules = rules |> List.rev |> List.concat in
-  let targets : Input_to_core_t.targets = target_mappings in
-  {
-    config with
-    target_source = Some (Targets targets);
-    rule_source = Some (Rules rules);
-  }
-
-(* Create the core result structure from the results *)
-(* LATER: we want to avoid this intermediate data structure but
+(* output adapter to Core_scan.scan.
+ * LATER: we want to avoid this intermediate data structure but
  * for now that's what pysemgrep used to get so simpler to return it.
  *)
-let create_core_result (all_rules : Rule.rule list)
-    (result_or_exn : Core_result.result_or_exn) =
+let mk_result (all_rules : Rule.rule list) (res : Core_result.t) : result =
   (* similar to Core_command.output_core_results code *)
-  let res =
-    match result_or_exn with
-    | Ok r -> r
-    | Error (exn, _core_error_opt) ->
-        (* TODO: use _core_error_opt instead? reraise the exn instead?
-         * TOADAPT? Runner_exit.exit_semgrep (Unknown_exception e) instead.
-         *)
-        let err = Core_error.exn_to_error None "" exn in
-        Core_result.mk_final_result_with_just_errors [ err ]
-  in
-  let scanned = Set_.of_list res.scanned in
+  let scanned = res.scanned |> List_.map Target.internal_path |> Set_.of_list in
   let match_results = Core_json_output.core_output_of_matches_and_errors res in
   (* TOPORT? or move in semgrep-core so get info ASAP
      if match_results.skipped_targets:
@@ -295,76 +225,90 @@ let create_core_result (all_rules : Rule.rule list)
 (* Entry point *)
 (*************************************************************************)
 
-(*
-   Take in rules and targets and return object with findings.
-*)
-let mk_scan_func_for_osemgrep (core_scan_func : Core_scan.core_scan_func) :
-    scan_func_for_osemgrep =
- fun ?(respect_git_ignore = true) ?(file_match_results_hook = None)
-     (conf : conf) (all_rules : Rule.t list)
-     (invalid_rules : Rule.invalid_rule_error list) (all_targets : Fpath.t list)
-     : Core_result.result_or_exn ->
-  let rule_errors = Core_scan.errors_of_invalid_rule_errors invalid_rules in
-  let config : Core_scan_config.t = core_scan_config_of_conf conf in
-  let config = { config with file_match_results_hook } in
-  (* TODO: we should not need to use Common.map below, because
-     Run_semgrep.semgrep_with_raw_results_and_exn_handler can accept
-     a list of targets with different languages! We just
-     need to pass the right target object (and not a lang_job)
-     TODO: Martin said the issue was that Run_semgrep.targets_of_config
-     requires the xlang object to contain a single language.
-     TODO: Martin says there's no fundamental reason to split
-     a scanning job by programming language. Several optimizations
-     are possible based on target project structure, number and diversity
-     of rules, presence of rule-specific include/exclude patterns etc.
-     Right now we're constrained by the pysemgrep/semgrep-core interface
-     that requires a split by "language". While this interface is still
-     in use, bypassing it without removing it seems complicated.
-     See https://www.notion.so/r2cdev/Osemgrep-scanning-algorithm-5962232bfd74433ba50f97c86bd1a0f3
-  *)
-  let lang_jobs = split_jobs_by_language all_rules all_targets in
-  let rules_with_targets =
-    List.concat_map (fun { Lang_job.rules; _ } -> rules) lang_jobs
-    |> List_.uniq_by Stdlib.( == )
+(* Core_scan.core_scan_func adapter for osemgrep *)
+let mk_core_run_for_osemgrep (core_scan_func : Core_scan.func) : func =
+  let run ?file_match_hook (conf : conf) (targeting_conf : Find_targets.conf)
+      (rules_and_invalid : Rule_error.rules_and_invalid)
+      (target_paths : Fpath.t list) : Core_result.result_or_exn =
+    (*
+       At this point, we already have the full list of targets. These targets
+       will populate the 'target_source' field of the config object
+       (after splitting into "languages").
+       This mode doesn't tolerate scanning roots. This is checked in
+       Core_scan.ml.
+    *)
+    let valid_rules, invalid_rules = rules_and_invalid in
+    (* Deduplicate rules for a correct rule count and avoid redundant
+       work or findings.
+       TODO: do this even earlier? *)
+    let valid_rules =
+      valid_rules
+      |> List_.deduplicate_gen ~get_key:(fun r ->
+             Rule_ID.to_string (fst r.Rule.id))
+    in
+    let rule_errors : Core_error.t list =
+      invalid_rules |> List_.map Core_error.error_of_invalid_rule
+    in
+    let config : Core_scan_config.t = core_scan_config_of_conf conf in
+    let config = { config with file_match_hook } in
+    (* LATER: Martin says there's no fundamental reason to split
+       a scanning job by programming language. Several optimizations
+       are possible based on target project structure, number and diversity
+       of rules, presence of rule-specific include/exclude patterns etc.
+       Right now we're constrained by the pysemgrep/semgrep-core interface
+       that requires a split by "language". While this interface is still
+       in use, bypassing it without removing it seems complicated.
+       See https://www.notion.so/r2cdev/Osemgrep-scanning-algorithm-5962232bfd74433ba50f97c86bd1a0f3
+    *)
+    let lang_jobs =
+      Core_targeting.split_jobs_by_language targeting_conf valid_rules
+        target_paths
+    in
+    report_status_and_add_metrics_languages
+      ~respect_gitignore:targeting_conf.respect_gitignore lang_jobs valid_rules
+      target_paths;
+    let code_targets, applicable_rules =
+      Core_targeting.targets_and_rules_of_lang_jobs lang_jobs
+    in
+    let final_targets =
+      (Hook.get hook_adjust_targets) target_paths code_targets
+    in
+    Logs.debug (fun m ->
+        m "core runner: %i applicable rules of %i valid rules, %i invalid rules"
+          (List.length applicable_rules)
+          (List.length valid_rules)
+          (List.length invalid_rules));
+    let config =
+      {
+        config with
+        target_source = Targets final_targets;
+        rule_source = Rules applicable_rules;
+      }
+    in
+
+    (* !!!!Finally! this is where we branch to semgrep-core core scan fun!!! *)
+    let/ res = core_scan_func config in
+    let rules_with_targets =
+      lang_jobs |> List.concat_map (fun { Lang_job.rules; _ } -> rules)
+    in
+    (* Reinject rule errors *)
+    let res =
+      {
+        res with
+        errors = rule_errors @ res.errors;
+        skipped_rules = invalid_rules @ res.skipped_rules;
+        valid_rules;
+        rules_with_targets;
+      }
+    in
+
+    let scanned =
+      res.scanned |> List_.map Target.internal_path |> Set_.of_list
+    in
+
+    Metrics_.add_max_memory_bytes res.profiling;
+    Metrics_.add_targets_stats scanned res.profiling;
+    Ok res
   in
-  Logs.app (fun m ->
-      m "%a"
-        (fun ppf () ->
-          (* TODO: validate if target is actually within a git repo and perhaps set respect_git_ignore to false otherwise *)
-          Status_report.pp_status ~num_rules:(List.length all_rules)
-            ~num_targets:(List.length all_targets) ~respect_git_ignore lang_jobs
-            ppf)
-        ());
-  List.iter
-    (fun { Lang_job.xlang; _ } ->
-      Metrics_.add_feature "language" (Xlang.to_string xlang))
-    lang_jobs;
-  let config = prepare_config_for_core_scan config lang_jobs in
-
-  (* !!!!Finally! this is where we branch to semgrep-core core scan fun!!! *)
-  let result_or_exn = core_scan_func config in
-  match result_or_exn with
-  | Error _ -> result_or_exn
-  | Ok res ->
-      (* Reinject rule errors *)
-      let res =
-        {
-          res with
-          errors = rule_errors @ res.errors;
-          skipped_rules = invalid_rules @ res.skipped_rules;
-          rules_with_targets;
-        }
-      in
-
-      let scanned = Set_.of_list res.scanned in
-
-      (* TODO(dinosaure): currently, we don't collect metrics when we invoke
-         semgrep-core but we should. However, if we implement a way to collect
-         metrics, we will just need to set [final_result.extra] to
-         [Core_result.Debug]/[Core_result.Time] and this line of code will not change. *)
-      Metrics_.add_max_memory_bytes
-        (Core_profiling.debug_info_to_option res.extra);
-      Metrics_.add_targets_stats scanned
-        (Core_profiling.debug_info_to_option res.extra);
-      Ok res
+  { run }
 [@@profiling]

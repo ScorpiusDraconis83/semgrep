@@ -21,7 +21,8 @@
     ; TODO: I've tried this, but this does not work so I've added --table in
     ; the few dune files using menhir
     ;(menhir_flags (--table))
-    ))
+    )
+)
 
 ; List of relevant directories to look for dune files for building. By omitting
 ; tests/ and stats/, which contain many files, we can speedup a little bit dune.
@@ -32,6 +33,5 @@
   libs
   languages
   src
-  js
   tools
 )

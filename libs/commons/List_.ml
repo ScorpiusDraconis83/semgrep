@@ -12,11 +12,12 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
  * license.txt for more details.
  *)
-open Common
 
 (*****************************************************************************)
-(* Faster List.map *)
+(* Faster and stack-safe List.map *)
 (*****************************************************************************)
+
+open Eq.Operators
 
 (*
    Custom list type used to store intermediate lists, while minimizing
@@ -117,6 +118,26 @@ let rec fast_map rec_calls_remaining f l =
 let map f l = fast_map 1000 f l
 
 (*****************************************************************************)
+(* Additional iterators *)
+(*****************************************************************************)
+
+let iter_with_view_into_neighbor_elements
+    (f : prev:'a option -> cur:'a -> next:'a option -> unit) xs =
+  let rec loop ~prev xs =
+    match xs with
+    | x :: tail ->
+        let next =
+          match tail with
+          | [] -> None
+          | next :: _ -> Some next
+        in
+        f ~prev ~cur:x ~next;
+        loop ~prev:(Some x) tail
+    | [] -> ()
+  in
+  loop ~prev:None xs
+
+(*****************************************************************************)
 (* Faster List.map2 *)
 (*****************************************************************************)
 
@@ -153,7 +174,7 @@ let rec slow_map2 acc f l1 l2 =
       let d = f d1 d2 in
       let e = f e1 e2 in
       slow_map2 (Tuple (e, d, c, b, a, acc)) f l1 l2
-  | _other -> raise (Failure "Common.map2: lists not equal length")
+  | _other -> raise (Failure "List_.map2: lists not equal length")
 
 let rec fast_map2 rec_calls_remaining f l1 l2 =
   if rec_calls_remaining <= 0 then slow_map2 Empty f l1 l2
@@ -190,7 +211,7 @@ let rec fast_map2 rec_calls_remaining f l1 l2 =
         let d = f d1 d2 in
         let e = f e1 e2 in
         a :: b :: c :: d :: e :: fast_map2 (rec_calls_remaining - 1) f l1 l2
-    | _other -> raise (Failure "Common.map2: lists not equal length")
+    | _other -> raise (Failure "List_.map2: lists not equal length")
 
 (*
    This implementation of List.map makes at most 1000 non-tailrec calls
@@ -201,12 +222,17 @@ let rec fast_map2 rec_calls_remaining f l1 l2 =
 let map2 f l1 l2 = fast_map2 1000 f l1 l2
 
 (*****************************************************************************)
-(* Other faster alternative to List.xxx functions *)
+(* Other safer alternatives to List.xxx functions *)
 (*****************************************************************************)
 
 (* Tail-recursive to prevent stack overflows. *)
 let flatten xss =
   xss |> List.fold_left (fun acc xs -> List.rev_append xs acc) [] |> List.rev
+
+let append a b = List.rev_append (List.rev a) b
+
+let fold_right func xs acc =
+  List.fold_left (fun acc x -> func x acc) acc (List.rev xs)
 
 (*****************************************************************************)
 (* Other list functions *)
@@ -222,6 +248,12 @@ let tl_exn errmsg xs =
   | [] -> failwith errmsg
   | _ :: tail -> tail
 
+let rec last_opt xs =
+  match xs with
+  | [] -> None
+  | [ x ] -> Some x
+  | _ :: tl -> last_opt tl
+
 let mapi f l = map2 f (List.init (List.length l) Fun.id) l
 
 let rec drop n xs =
@@ -234,7 +266,7 @@ let take n xs =
   let rec next n xs acc =
     match (n, xs) with
     | 0, _ -> List.rev acc
-    | _, [] -> failwith "Common.take: not enough"
+    | _, [] -> failwith "List_.take: not enough"
     | n, x :: xs -> next (n - 1) xs (x :: acc)
   in
   next n xs []
@@ -249,14 +281,14 @@ let enum x n =
 
 let exclude p xs = List.filter (fun x -> not (p x)) xs
 
-let rec (span : ('a -> bool) -> 'a list -> 'a list * 'a list) =
- fun p -> function
-  | [] -> ([], [])
-  | x :: xs ->
-      if p x then
-        let l1, l2 = span p xs in
-        (x :: l1, l2)
-      else ([], x :: xs)
+let span (p : 'a -> bool) xs =
+  let rec span acc_left xs =
+    match xs with
+    | [] -> (acc_left, [])
+    | x :: tail -> if p x then span (x :: acc_left) tail else (acc_left, xs)
+  in
+  let acc_left, right = span [] xs in
+  (List.rev acc_left, right)
 
 let rec take_safe n xs =
   match (n, xs) with
@@ -264,12 +296,11 @@ let rec take_safe n xs =
   | _, [] -> []
   | n, x :: xs -> x :: take_safe (n - 1) xs
 
-let rec zip xs ys =
-  match (xs, ys) with
-  | [], [] -> []
-  | [], _ -> failwith "zip: not same length"
-  | _, [] -> failwith "zip: not same length"
-  | x :: xs, y :: ys -> (x, y) :: zip xs ys
+(* Safe reimplementation of List.split *)
+let split xs = fold_right (fun (x, y) (xs, ys) -> (x :: xs, y :: ys)) xs ([], [])
+
+(* Safe reimplementation of List.combine *)
+let combine xs ys = map2 (fun a b -> (a, b)) xs ys
 
 let null xs =
   match xs with
@@ -278,7 +309,7 @@ let null xs =
 
 let index_list xs =
   if null xs then [] (* enum 0 (-1) generate an exception *)
-  else zip xs (enum 0 (List.length xs - 1))
+  else combine xs (enum 0 (List.length xs - 1))
 
 let index_list_0 xs = index_list xs
 let index_list_1 xs = xs |> index_list |> map (fun (x, i) -> (x, i + 1))
@@ -287,13 +318,8 @@ let index_list_1 xs = xs |> index_list |> map (fun (x, i) -> (x, i + 1))
 (* Options and lists *)
 (*****************************************************************************)
 
-let rec filter_some = function
-  | [] -> []
-  | None :: l -> filter_some l
-  | Some e :: l -> e :: filter_some l
-
 (* Tail-recursive to prevent stack overflows. *)
-let map_filter f xs =
+let filter_map f xs =
   List.fold_left
     (fun acc x ->
       match f x with
@@ -301,6 +327,25 @@ let map_filter f xs =
       | Some y -> y :: acc)
     [] xs
   |> List.rev
+
+let filter_map_endo f xs =
+  let changed = ref false in
+  let xs' =
+    List.fold_left
+      (fun acc x ->
+        match f x with
+        | None ->
+            changed := true;
+            acc
+        | Some y ->
+            if Eq.phys_not_equal x y then changed := true;
+            y :: acc)
+      [] xs
+    |> List.rev
+  in
+  if !changed then xs' else xs
+
+let filter_some xs = filter_map (fun x -> x) xs
 
 let rec find_some_opt p = function
   | [] -> None
@@ -325,15 +370,39 @@ let optlist_to_list = function
 
 let sort xs = List.sort compare xs
 
+let sort_by_key (key : 'a -> 'b) (cmp : 'b -> 'b -> int) (xs : 'a list) =
+  map (fun x -> (key x, x)) xs
+  |> List.sort (fun (x, _) (y, _) -> cmp x y)
+  |> map snd
+
 (* maybe too slow? use an hash instead to first group, and then in
  * that group remove duplicates? *)
-let rec uniq_by eq xs =
-  match xs with
-  | [] -> []
-  | x :: xs -> (
-      match List.find_opt (fun y -> eq x y) xs with
-      | Some _ -> uniq_by eq xs
-      | None -> x :: uniq_by eq xs)
+let uniq_by eq xs =
+  let rec uniq_by acc xs =
+    match xs with
+    | [] -> acc
+    | x :: xs ->
+        if List.exists (fun y -> eq x y) acc then uniq_by acc xs
+        else uniq_by (x :: acc) xs
+  in
+  uniq_by [] xs |> List.rev
+
+let deduplicate_gen ~get_key xs =
+  let tbl = Hashtbl.create (List.length xs) in
+  (* We could use List.filter but it's not guaranteed to proceed from
+     left to right which would result in not necessarily selecting the first
+     occurrence of each element *)
+  List.fold_left
+    (fun acc x ->
+      let key = get_key x in
+      if Hashtbl.mem tbl key then acc
+      else (
+        Hashtbl.add tbl key ();
+        x :: acc))
+    [] xs
+  |> List.rev
+
+let deduplicate xs = deduplicate_gen (fun x -> x) xs
 
 (*****************************************************************************)
 (* Misc (was in common2.ml) *)
@@ -355,3 +424,8 @@ let enum x n =
     if x =|= n then n :: acc else enum_aux (x :: acc) (x + 1) n
   in
   List.rev (enum_aux [] x n)
+
+(* for 'open List_.Operators' *)
+module Operators = struct
+  let ( @ ) = ( @ )
+end

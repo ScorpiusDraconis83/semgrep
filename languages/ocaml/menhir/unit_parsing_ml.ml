@@ -1,5 +1,7 @@
 open Common
 
+let t = Testo.create
+
 (*****************************************************************************)
 (* Unit tests *)
 (*****************************************************************************)
@@ -7,29 +9,27 @@ open Common
 (* ran from the root of the semgrep repository *)
 let tests_path = "tests"
 
-let tests =
-  Alcotest_ext.pack_tests "parsing_ml"
+let tests (caps : < Cap.tmp >) =
+  Testo.categorize "parsing_ml"
     [
-      ( "regression files",
-        fun () ->
+      t "regression files" (fun () ->
           let dir = Filename.concat tests_path "ml/parsing" in
           let files = Common2.glob (spf "%s/*.ml" dir) in
           files
           |> List.iter (fun file ->
                  try
-                   let _ = Parse_ml.parse_program file in
+                   let _ = Parse_ml.parse_program (Fpath.v file) in
                    ()
                  with
                  | Parsing_error.Syntax_error _ ->
-                     Alcotest.failf "it should correctly parse %s" file) );
+                     Alcotest.failf "it should correctly parse %s" file));
       (* Check that the visitor implementation correctly visit all AST
        * subelements, even when they are deep inside the AST tree (e.g.
        * sub-sub expressions inside parenthesis).
        *)
-      ( "visitor",
-        fun () ->
-          Common2.with_tmp_file ~ext:".ml" ~str:"open Foo1\nmodule A = Foo2\n"
-            (fun file ->
+      t "visitor" (fun () ->
+          CapTmp.with_temp_file caps#tmp ~suffix:".ml"
+            ~contents:"open Foo1\nmodule A = Foo2\n" (fun file ->
               let _ast = Parse_ml.parse_program file in
               let _cnt = ref 0 in
               (* TODO use Visitor_AST of ml_to_generic
@@ -64,5 +64,5 @@ let tests =
                        visitor (Program ast);
                        assert_equal 2 !cnt;
               *)
-              ()) );
+              ()));
     ]

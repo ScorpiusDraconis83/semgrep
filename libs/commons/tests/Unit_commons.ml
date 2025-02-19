@@ -4,6 +4,8 @@
 
 open Printf
 
+let t = Testo.create
+
 (*
    This only checks the correctness of the results of the map function.
    For a benchmark, we could use and adapt
@@ -41,7 +43,7 @@ let test_common_map =
     let input = List.init len (fun i -> i) in
     let f x = x + 1 in
     let acc = ref [] in
-    let expected_output = List.map f input in
+    let expected_output = List_.map f input in
     let output =
       List_.map
         (fun x ->
@@ -59,7 +61,7 @@ let test_common_map =
       (fun len ->
         let name = sprintf "list length = %i" len in
         let test () = test len in
-        (name, test))
+        t name test)
       list_lengths
   in
   tests
@@ -75,7 +77,7 @@ let test_cat () =
   let oc = open_out_bin file in
   output_string oc contents;
   close_out oc;
-  match UCommon.cat file with
+  match UFile.Legacy.cat file with
   | [ "hello"; "world"; "!" ] -> ()
   | lines ->
       List.iteri (fun i line -> eprintf "line %i: %S\n" i line) lines;
@@ -118,32 +120,32 @@ let with_file contents f =
 let test_read_file () =
   (* test file smaller than one filesystem block (most likely) *)
   let data = String.make 200 'A' in
-  with_file data (fun file -> assert (UCommon.read_file file = data));
+  with_file data (fun file -> assert (UFile.Legacy.read_file file = data));
   (* test file larger than one filesystem block (most likely) *)
   let data = String.make 100_000 'A' in
-  with_file data (fun file -> assert (UCommon.read_file file = data));
+  with_file data (fun file -> assert (UFile.Legacy.read_file file = data));
   (* test empty file *)
   let data = "" in
-  with_file data (fun file -> assert (UCommon.read_file file = data));
+  with_file data (fun file -> assert (UFile.Legacy.read_file file = data));
   (* test partial read *)
   let data = String.make 8192 'A' in
   let max_len = 100 in
   with_file data (fun file ->
-      assert (UCommon.read_file ~max_len file = String.sub data 0 max_len));
+      assert (UFile.Legacy.read_file ~max_len file = String.sub data 0 max_len));
   (* test 0-length read *)
   let data = String.make 8192 'A' in
   let max_len = 0 in
   with_file data (fun file ->
-      assert (UCommon.read_file ~max_len file = String.sub data 0 max_len))
+      assert (UFile.Legacy.read_file ~max_len file = String.sub data 0 max_len))
 
 let tests =
-  Alcotest_ext.pack_suites "commons"
+  Testo.categorize_suites "commons"
     [
-      Alcotest_ext.pack_suites "common"
+      Testo.categorize_suites "common"
         [
-          Alcotest_ext.pack_tests "map" test_common_map;
-          Alcotest_ext.simple_tests [ ("cat", test_cat) ];
-          Alcotest_ext.simple_tests [ ("readable", test_readable) ];
-          Alcotest_ext.simple_tests [ ("read_file", test_read_file) ];
+          Testo.categorize "map" test_common_map;
+          [ t "cat" test_cat ];
+          [ t "readable" test_readable ];
+          [ t "read_file" test_read_file ];
         ];
     ]

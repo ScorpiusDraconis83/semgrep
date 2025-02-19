@@ -1,7 +1,7 @@
 (* Colleen Dai
  * Yoann Padioleau
  *
- * Copyright (c) 2021, 2022 R2C
+ * Copyright (c) 2021, 2022 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -14,6 +14,7 @@
  * LICENSE for more details.
  *)
 open Common
+open Fpath_.Operators
 module CST = Tree_sitter_kotlin.CST
 module H = Parse_tree_sitter_helpers
 open AST_generic
@@ -56,6 +57,22 @@ let vars_to_pattern (l, xs, r) =
   PatTuple (l, ys, r)
 
 (*****************************************************************************)
+(* Constants *)
+(*****************************************************************************)
+
+(* The fake name @@@PARTIAL_CLASS_DECLARATION is used to distinguish
+ * 1) two valid class declarations in a row vs
+ * 2) a class declaration followed by a partial class declaration
+ *
+ * Valid kotlin programs cannot have class names that have @@@, so we will
+ * know that this did not come from the source code.
+ *
+ * We will use this fake name to detect partial class
+ * declarations in the function merge_class_declarations below.
+ *)
+let fake_name_for_partial_class_decl = "@@@PARTIAL_CLASS_DECLARATION"
+
+(*****************************************************************************)
 (* Boilerplate converter *)
 (*****************************************************************************)
 (* This was started by copying tree-sitter-lang/semgrep-kotlin/Boilerplate.ml *)
@@ -75,21 +92,18 @@ let equality_operator (env : env) (x : CST.equality_operator) =
   | `BANGEQEQ tok -> (NotPhysEq, token env tok) (* "!==" *)
   | `EQEQ tok -> (Eq, token env tok) (* "==" *)
   | `EQEQEQ tok -> (PhysEq, token env tok)
-
 (* "===" *)
 
 let anon_choice_val_2833752 (env : env) (x : CST.anon_choice_val_2833752) =
   match x with
   | `Val tok -> (Const, token env tok) (* "val" *)
   | `Var tok -> (Mutable, token env tok)
-
 (* "var" *)
 
 let platform_modifier (env : env) (x : CST.platform_modifier) =
   match x with
   | `Expect tok -> G.unhandled_keywordattr (str env tok) (* "expect" *)
   | `Actual tok -> G.unhandled_keywordattr (str env tok)
-
 (* "actual" *)
 
 let real_literal (env : env) (tok : CST.real_literal) =
@@ -103,7 +117,6 @@ let comparison_operator (env : env) (x : CST.comparison_operator) =
   | `GT tok -> (Gt, token env tok) (* ">" *)
   | `LTEQ tok -> (LtE, token env tok) (* "<=" *)
   | `GTEQ tok -> (GtE, token env tok)
-
 (* ">=" *)
 
 let assignment_and_operator (env : env) (x : CST.assignment_and_operator) =
@@ -113,7 +126,6 @@ let assignment_and_operator (env : env) (x : CST.assignment_and_operator) =
   | `STAREQ tok -> (Mult, token env tok) (* "*=" *)
   | `SLASHEQ tok -> (Div, token env tok) (* "/=" *)
   | `PERCEQ tok -> (Mod, token env tok)
-
 (* "%=" *)
 
 let inheritance_modifier (env : env) (x : CST.inheritance_modifier) =
@@ -121,7 +133,6 @@ let inheritance_modifier (env : env) (x : CST.inheritance_modifier) =
   | `Abst tok -> KeywordAttr (Abstract, token env tok) (* "abstract" *)
   | `Final tok -> KeywordAttr (Final, token env tok) (* "final" *)
   | `Open tok -> G.unhandled_keywordattr (str env tok)
-
 (* "open" *)
 
 let postfix_unary_operator (env : env) (x : CST.postfix_unary_operator) =
@@ -419,7 +430,8 @@ let import_header (env : env) ((v1, v2, v3, v4) : CST.import_header) : directive
           | [] -> raise Common.Impossible
           | x :: xs -> (x, List.rev xs)
         in
-        ImportFrom (v1, DottedName module_name, [ (ident, None) ])
+        ImportFrom
+          (v1, DottedName module_name, [ H2.mk_import_from_kind ident None ])
   in
   let _v4 = semi env v4 (* pattern [\r\n]+ *) in
   v3 |> G.d
@@ -460,7 +472,7 @@ and anon_choice_param_b77c1d8 (env : env) (x : CST.anon_choice_param_b77c1d8) =
   match x with
   | `Param x ->
       let v1, v2 = parameter env x in
-      let param = G.param_of_id v1 ~ptype:(Some v2) in
+      let param = G.param_of_id v1 ~ptype:v2 in
       Param param
   | `Type x ->
       let v1 = type_ env x in
@@ -505,7 +517,7 @@ and type_test (env : env) ((v1, v2) : CST.type_test) =
   let op, tok = is_operator env v1 in
   let t2 = type_ env v2 in
   fun e1 ->
-    G.Call (G.IdSpecial (G.Op op, tok) |> G.e, fb [ G.Arg e1; G.ArgType t2 ])
+    G.Call (G.Special (G.Op op, tok) |> G.e, fb [ G.Arg e1; G.ArgType t2 ])
     |> G.e
 
 and binary_expression (env : env) (x : CST.binary_expression) =
@@ -602,7 +614,7 @@ and catch_block (env : env) ((v1, v2, v3, v4, v5, v6, v7, v8) : CST.catch_block)
   let v6 = type_ env v6 in
   let _v7 = token env v7 (* ")" *) in
   let v8 = block env v8 in
-  let exn = CatchParam (G.param_of_type v6 ~pname:(Some v4)) in
+  let exn = CatchParam (G.param_of_type v6 ~pname:v4) in
   (v1, exn, v8)
 
 and class_body (env : env) ((v1, v2, v3) : CST.class_body) =
@@ -630,8 +642,8 @@ and class_declaration (env : env) (x : CST.class_declaration) :
       let v3 = simple_identifier env v3 in
       let v4 =
         match v4 with
-        | Some x -> type_parameters env x
-        | None -> []
+        | Some x -> Some (type_parameters env x)
+        | None -> None
       in
       let cparams =
         match v5 with
@@ -641,7 +653,7 @@ and class_declaration (env : env) (x : CST.class_declaration) :
       (* alt: we could identify in the list below the class with arguments,
        * which is the 'cextends', and put the rest in 'cimplements'.
        * Either.Right now we just put everything in 'cextends' and have
-       * Generic_vs_generic.m_list__m_class_parent do clever matching.
+       * m_list__m_class_parent do clever matching.
        *)
       let cextends =
         match v6 with
@@ -661,7 +673,7 @@ and class_declaration (env : env) (x : CST.class_declaration) :
         | Some x -> class_body env x
         | None -> fb []
       in
-      let ent = G.basic_entity v3 ~attrs:v1 ~tparams:v4 in
+      let ent = G.basic_entity v3 ~attrs:v1 ?tparams:v4 in
       let cdef =
         { ckind; cextends; cimplements = []; cmixins = []; cparams; cbody }
       in
@@ -672,11 +684,7 @@ and class_declaration (env : env) (x : CST.class_declaration) :
       let v2 = token env v2 (* "enum" *) in
       let tclass = token env v3 (* "class" *) in
       let v4 = simple_identifier env v4 in
-      let v5 =
-        match v5 with
-        | Some x -> type_parameters env x
-        | None -> []
-      in
+      let v5 = Option.map (type_parameters env) v5 in
       let cparams =
         match v6 with
         | Some x -> primary_constructor env x
@@ -701,7 +709,7 @@ and class_declaration (env : env) (x : CST.class_declaration) :
         | None -> fb []
       in
       let ent =
-        G.basic_entity v4 ~attrs:(G.attr EnumClass v2 :: v1) ~tparams:v5
+        G.basic_entity v4 ~attrs:(G.attr EnumClass v2 :: v1) ?tparams:v5
       in
       let cdef =
         {
@@ -785,7 +793,7 @@ and class_member_declaration (env : env) (x : CST.class_member_declaration) :
           (ent, FuncDef def) |> G.fld)
   | `Ellips x ->
       let x = token env x in
-      G.fieldEllipsis x
+      G.field_ellipsis x
 
 and class_member_declarations (env : env) (xs : CST.class_member_declarations) :
     field list =
@@ -818,7 +826,7 @@ and class_parameter (env : env) (x : CST.class_parameter) : G.parameter =
             Some v2
         | None -> None
       in
-      Param (G.param_of_id v3 ~pdefault:v6 ~ptype:(Some v5) ~pattrs:(v1 @ v2))
+      Param (G.param_of_id v3 ?pdefault:v6 ~ptype:v5 ~pattrs:(v1 @ v2))
   | `Ellips v1 ->
       (* "..." *)
       let tk = token env v1 in
@@ -860,7 +868,7 @@ and constructor_delegation_call (env : env)
     (* "super" *)
   in
   let v2 = value_arguments env v2 in
-  let e = IdSpecial v1 |> G.e in
+  let e = G.N (G.IdSpecial (v1, G.empty_id_info ())) |> G.e in
   Call (e, v2) |> G.e
 
 and constructor_invocation (env : env) ((v1, v2) : CST.constructor_invocation) =
@@ -912,7 +920,7 @@ and declaration (env : env) (x : CST.declaration) : definition =
         {
           name = OtherEntity (("Getter", tget), []);
           attrs = mods;
-          tparams = [];
+          tparams = None;
         }
       in
       (ent, OtherDef (("Getter", tget), []))
@@ -922,7 +930,7 @@ and declaration (env : env) (x : CST.declaration) : definition =
         {
           name = OtherEntity (("Setter", tset), []);
           attrs = mods;
-          tparams = [];
+          tparams = None;
         }
       in
       (ent, OtherDef (("Setter", tset), []))
@@ -961,11 +969,7 @@ and declaration (env : env) (x : CST.declaration) : definition =
   | `Func_decl (v1, v2, v3, v4, v5, v6, v7, v8, v9) ->
       let v1 = modifiers_opt env v1 in
       let v2 = token env v2 (* "fun" *) in
-      let v3 =
-        match v3 with
-        | Some x -> type_parameters env x
-        | None -> []
-      in
+      let v3 = Option.map (type_parameters env) v3 in
       (* TODO: receiver type, build a complex name with v5 *)
       let _v4TODO = anon_opt_rece_type_opt_DOT_cc9388e env v4 in
       let v5 = simple_identifier env v5 in
@@ -988,7 +992,7 @@ and declaration (env : env) (x : CST.declaration) : definition =
         | Some x -> function_body env x
         | None -> G.FBDecl G.sc
       in
-      let entity = basic_entity v5 ~attrs:v1 ~tparams:v3 in
+      let entity = basic_entity v5 ~attrs:v1 ?tparams:v3 in
       let func_def =
         { fkind = (Function, v2); fparams = v6; frettype = v7; fbody = v9 }
       in
@@ -997,11 +1001,7 @@ and declaration (env : env) (x : CST.declaration) : definition =
   | `Prop_decl (v1, v2, v3, v4, v5, v6, v7, v8, v9) ->
       let v1 = modifiers_opt env v1 in
       let v2 = KeywordAttr (anon_choice_val_2833752 env v2) in
-      let v3 =
-        match v3 with
-        | Some x -> type_parameters env x
-        | None -> []
-      in
+      let v3 = Option.map (type_parameters env) v3 in
       (* TODO: distribute the name to all variable decls? *)
       let _v4TODO = anon_opt_rece_type_opt_DOT_cc9388e env v4 in
       let entname, typopt = lambda_parameter_for_property env v5 in
@@ -1010,7 +1010,7 @@ and declaration (env : env) (x : CST.declaration) : definition =
         | Some x -> type_constraints env x
         | None -> []
       in
-      let v7 =
+      let vinit =
         match v7 with
         | Some x -> (
             match x with
@@ -1021,7 +1021,7 @@ and declaration (env : env) (x : CST.declaration) : definition =
             | `Prop_dele x -> property_delegate env x)
         | None -> None
       in
-      let _v8 =
+      let vtok =
         match v8 with
         | Some tok -> (* ";" *) Some (token env tok)
         | None -> None
@@ -1041,21 +1041,17 @@ and declaration (env : env) (x : CST.declaration) : definition =
                 Some (Either.Right x)
             | None -> None)
       in
-      let vdef = { vinit = v7; vtype = typopt } in
+      let vdef = { vinit; vtype = typopt; vtok } in
       let ent = { name = entname; attrs = v2 :: v1; tparams = v3 } in
       (ent, VarDef vdef)
   | `Type_alias (v0, v1, v2, v3, v4, v5) ->
       let attrs = modifiers_opt env v0 in
       let _kwd = token env v1 (* "typealias" *) in
       let id = simple_identifier env v2 in
-      let tparams =
-        match v3 with
-        | None -> []
-        | Some v3 -> type_parameters env v3
-      in
+      let tparams = Option.map (type_parameters env) v3 in
       let _eq = token env v4 (* "=" *) in
       let t = type_ env v5 in
-      let ent = basic_entity ~attrs ~tparams id in
+      let ent = basic_entity ~attrs ?tparams id in
       let tdef = { tbody = AliasType t } in
       (ent, TypeDef tdef)
 
@@ -1278,7 +1274,7 @@ and function_value_parameter (env : env) (x : CST.function_value_parameter) =
             Some e
         | None -> None
       in
-      let param = G.param_of_id pname ~ptype:(Some ptype) ~pdefault ~pattrs in
+      let param = G.param_of_id pname ~ptype ?pdefault ~pattrs in
       Param param
   | `Ellips tok ->
       (* "..." *)
@@ -1468,7 +1464,7 @@ and var_or_multivar (env : env) (x : CST.lambda_parameter) =
 
 and lambda_parameter (env : env) (x : CST.lambda_parameter) : G.parameter =
   match var_or_multivar env x with
-  | Either.Left (id, ptype) -> G.Param (G.param_of_id id ~ptype)
+  | Either.Left (id, ptype) -> G.Param (G.param_of_id id ?ptype)
   | Either.Right (l, xs, r) ->
       let pat = vars_to_pattern (l, xs, r) in
       G.ParamPattern pat
@@ -1631,7 +1627,7 @@ and parameter_with_optional_type (env : env)
         Some v2
     | None -> None
   in
-  G.param_of_id v2 ~pattrs:v1 ~ptype:v3
+  G.param_of_id v2 ~pattrs:v1 ?ptype:v3
 
 and parenthesized_expression (env : env)
     ((v1, v2, v3) : CST.parenthesized_expression) : G.expr =
@@ -1734,11 +1730,11 @@ and primary_expression (env : env) (x : CST.primary_expression) : expr =
       Container (List, (v1, v2 :: v3, v4)) |> G.e
   | `This_exp tok ->
       let tok = token env tok in
-      IdSpecial (This, tok) |> G.e
+      G.N (IdSpecial ((This, tok), G.empty_id_info ())) |> G.e
       (* "this" *)
   | `Super_exp v1 ->
       let tok = token env v1 in
-      IdSpecial (Super, tok) |> G.e
+      G.N (IdSpecial ((Super, tok), G.empty_id_info ())) |> G.e
   | `Call_exp (v1, v2) ->
       let v1 = expression env v1 in
       let v2 = call_suffix env v2 in
@@ -1880,6 +1876,40 @@ and statement (env : env) (x : CST.statement) : stmt =
             G.exprstmt v1
       in
       v2
+  | `Part_class_decl (v1, v2, v3, v4, v5, v6, v7) ->
+      let tparams =
+        match v1 with
+        | Some x -> Some (type_parameters env x)
+        | None -> None
+      in
+      let cparams = primary_constructor env (Some (v2, v3), v4) in
+      let cextends =
+        match v5 with
+        | Some (v1, v2) ->
+            let _v1 = token env v1 (* ":" *) in
+            let v2 = delegation_specifiers env v2 in
+            v2
+        | None -> []
+      in
+      let _type_constraints_TODO =
+        match v6 with
+        | Some x -> type_constraints env x
+        | None -> []
+      in
+      let cbody =
+        match v7 with
+        | Some x -> class_body env x
+        | None -> fb []
+      in
+      let ckind = (Class, fake "class") in
+      (* See Constants section above why we use fake_name_for_partial_class_decl. *)
+      let fake_ident = (fake_name_for_partial_class_decl, fake "fake_tok") in
+      let ent = basic_entity fake_ident ?tparams in
+      let cdef =
+        { ckind; cextends; cimplements = []; cmixins = []; cparams; cbody }
+      in
+      let def = (ent, ClassDef cdef) in
+      DefStmt def |> G.s
 
 and statements (env : env) ((v1, v2, v3) : CST.statements) =
   let v1 = statement env v1 in
@@ -2006,17 +2036,15 @@ and type_parameter (env : env) ((v1, v2, v3) : CST.type_parameter) =
         [ v2 ]
     | None -> []
   in
-  let tp_attrs, variances =
-    Either_.partition_either (fun x -> x) tp_modifiers
-  in
-  let tp_attrs = List.flatten tp_attrs in
+  let tp_attrs, variances = Either_.partition (fun x -> x) tp_modifiers in
+  let tp_attrs = List_.flatten tp_attrs in
   let tp_variance =
     match variances with
     | [] -> None
     (* can have multiple variance? I just keep the first one *)
     | x :: _ -> Some x
   in
-  G.tparam_of_id tp_id ~tp_attrs ~tp_bounds ~tp_variance
+  G.tparam_of_id tp_id ~tp_attrs ~tp_bounds ?tp_variance
 
 and type_parameter_modifier (env : env) (x : CST.type_parameter_modifier) =
   match x with
@@ -2030,8 +2058,9 @@ and type_parameter_modifier (env : env) (x : CST.type_parameter_modifier) =
 and type_parameter_modifiers (env : env) (xs : CST.type_parameter_modifiers) =
   List_.map (type_parameter_modifier env) xs
 
-and type_parameters (env : env) ((v1, v2, v3, v4) : CST.type_parameters) =
-  let _v1 = token env v1 (* "<" *) in
+and type_parameters (env : env) ((v1, v2, v3, v4) : CST.type_parameters) :
+    G.type_parameters =
+  let lt = token env v1 (* "<" *) in
   let v2 = type_parameter env v2 in
   let v3 =
     List_.map
@@ -2041,8 +2070,8 @@ and type_parameters (env : env) ((v1, v2, v3, v4) : CST.type_parameters) =
         v2)
       v3
   in
-  let _v4 = token env v4 (* ">" *) in
-  v2 :: v3
+  let gt = token env v4 (* ">" *) in
+  (lt, v2 :: v3, gt)
 
 and type_projection (env : env) ~tok (x : CST.type_projection) =
   match x with
@@ -2204,7 +2233,7 @@ and when_condition (env : env) (x : CST.when_condition) : G.expr =
   | `Type_test (v1, v2) ->
       let op, tok = is_operator env v1 in
       let t = type_ env v2 in
-      G.Call (G.IdSpecial (G.Op op, tok) |> G.e, fb [ G.ArgType t ]) |> G.e
+      G.Call (G.Special (G.Op op, tok) |> G.e, fb [ G.ArgType t ]) |> G.e
 
 and when_entry (env : env) ((v1, v2, v3, v4) : CST.when_entry) =
   let v1 =
@@ -2223,7 +2252,7 @@ and when_entry (env : env) ((v1, v2, v3, v4) : CST.when_entry) =
           v2
           |> List.fold_left (fun acc (t, e) -> G.opcall (And, t) [ acc; e ]) v1
         in
-        Case (fake "case", PatWhen (PatUnderscore (fake "_"), cond))
+        Case (fake "case", PatWhen (PatWildcard (fake "_"), cond))
     | `Else tok -> Default (token env tok)
     (* "else" *)
   in
@@ -2278,6 +2307,60 @@ let file_annotation (env : env) ((v1, v2, v3, v4, v5) : CST.file_annotation) =
   let _semi = semi env v5 in
   ()
 
+let merge_class_declarations (xs : stmt list) : stmt list =
+  let rec merge rev_acc (xs : stmt list) =
+    match xs with
+    (* Merge two consecutive class declarations, if the second one
+     * is a partial class declaration.
+     *
+     * For the first class declaration, only the name, kind of class,
+     * attributes, and type parameters will/may be populated because
+     * it will come from the code
+     *   @SomeAttribute class SomeClassName < TypeParam >
+     * or
+     *   @SomeAttribute enum SomeClassName < TypeParam >
+     *
+     * The rest is populated by the second part which is a partial
+     * class declaration.
+     *
+     * We expect that each class declaration will have at most one
+     * corresponding partial class declaration that follows immediately.
+     *
+     * If we missed something and somehow this is not the case, we will
+     * let the partial class declaration remain in the Generic AST.
+     *)
+    | { s = DefStmt ({ name; attrs; tparams }, ClassDef { ckind; _ }); _ }
+      :: {
+           s =
+             DefStmt
+               ( {
+                   name = EN (Id ((class_name, _), _));
+                   attrs = [];
+                   tparams = new_tparams;
+                 },
+                 ClassDef
+                   { ckind = _; cextends; cimplements; cmixins; cparams; cbody }
+               );
+           _;
+         }
+      :: rest
+      when class_name = fake_name_for_partial_class_decl ->
+        let tparams =
+          match tparams with
+          | Some _ -> tparams
+          | None -> new_tparams
+        in
+        let ent = { name; attrs; tparams } in
+        let cdef =
+          ClassDef { ckind; cextends; cimplements; cmixins; cparams; cbody }
+        in
+        let stmt = DefStmt (ent, cdef) |> G.s in
+        merge (stmt :: rev_acc) rest
+    | x :: rest -> merge (x :: rev_acc) rest
+    | [] -> List.rev rev_acc
+  in
+  merge [] xs
+
 let source_file (env : env) (x : CST.source_file) : any =
   match x with
   | `Opt_sheb_line_rep_file_anno_opt_pack_header_rep_import_list_rep_stmt_semi
@@ -2302,8 +2385,9 @@ let source_file (env : env) (x : CST.source_file) : any =
             v1)
           v5
       in
+      let xs = merge_class_declarations v5 in
       let dirs = v3 @ v4 |> List_.map (fun d -> DirectiveStmt d |> G.s) in
-      Pr (dirs @ v5)
+      Pr (dirs @ xs)
   | `Semg_exp (_v1, v2) ->
       let v2 = expression env v2 in
       E v2
@@ -2313,8 +2397,8 @@ let source_file (env : env) (x : CST.source_file) : any =
 (*****************************************************************************)
 let parse file =
   H.wrap_parser
-    (fun () -> Tree_sitter_kotlin.Parse.file file)
-    (fun cst ->
+    (fun () -> Tree_sitter_kotlin.Parse.file !!file)
+    (fun cst _extras ->
       let env = { H.file; conv = H.line_col_to_pos file; extra = Program } in
       match source_file env cst with
       | G.Pr xs -> xs
@@ -2331,7 +2415,9 @@ let parse_expression_or_source_file str =
 let parse_pattern str =
   H.wrap_parser
     (fun () -> parse_expression_or_source_file str)
-    (fun cst ->
-      let file = "<pattern>" in
-      let env = { H.file; conv = Hashtbl.create 0; extra = Pattern } in
+    (fun cst _extras ->
+      let file = Fpath.v "<pattern>" in
+      let env =
+        { H.file; conv = H.line_col_to_pos_pattern str; extra = Pattern }
+      in
       source_file env cst)

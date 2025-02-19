@@ -17,6 +17,10 @@ open Core_jsonnet
 module A = AST_jsonnet
 module V = Value_jsonnet
 
+let src = Logs.Src.create "ojsonnet.eval"
+
+module Log = (val Logs.src_log src : Logs.LOG)
+
 (*****************************************************************************)
 (* Prelude *)
 (*****************************************************************************)
@@ -104,7 +108,7 @@ let short_string_of_value (v : V.t) : string =
 
 let debug_call (env : V.env) (e0 : expr) (l, args, _r) : unit =
   if not env.in_debug_call then
-    Logs.debug (fun m ->
+    Log.debug (fun m ->
         let env = { env with in_debug_call = true } in
         let fstr = str_of_caller e0 in
         m "%s> %s(%s) at %s"
@@ -132,7 +136,7 @@ let debug_call (env : V.env) (e0 : expr) (l, args, _r) : unit =
 
 let debug_ret (env : V.env) (e0 : expr) (_l, _args, _r) (retv : V.t) : unit =
   if not env.in_debug_call then
-    Logs.debug (fun m ->
+    Log.debug (fun m ->
         let fstr = str_of_caller e0 in
         m "%s< %s(...) = %s"
           (Common2.repeat "-" env.depth |> String.concat "")
@@ -150,7 +154,7 @@ let eval_call_ (env : V.env) (e0 : expr) (largs, args, _rargs) =
       (* the named_args are supposed to be the last one *)
       let basic_args, named_args =
         args
-        |> Either_.partition_either (function
+        |> Either_.partition (function
              | Arg ei -> Left ei
              | NamedArg (id, _tk, ei) -> Right (fst id, ei))
       in
@@ -327,7 +331,7 @@ let eval_std_method_ (env : V.env) (e0 : expr) (method_str, tk) (l, args, r) =
           let elts' =
             (* TODO? use Array.to_seqi instead? *)
             eis |> Array.to_list |> List_.index_list
-            |> List.filter_map (fun (ei, ji) ->
+            |> List_.filter_map (fun (ei, ji) ->
                    match
                      env.eval_std_filter_element { env with locals } tk f ei
                    with

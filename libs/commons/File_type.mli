@@ -8,6 +8,7 @@ type file_type =
   | Media of media_type
   | Archive of string
   | Other of string
+[@@deriving yojson]
 
 and pl_type =
   | OCaml of string
@@ -35,6 +36,7 @@ and pl_type =
   | Erlang
   | Go
   | Rust
+  | Move
   | Beta
   | Pascal
   | Haxe
@@ -44,18 +46,23 @@ and pl_type =
   | IDL of idl_type
   | MiscPL of string
   | Elixir
+[@@deriving yojson]
 
 and config_type =
   | Makefile
   | Dockerfile
   | Json
   | Jsonnet
+  | Properties
+  | Ignore of string
+  | RC of string
   | Yaml
   | Terraform
   | Sexp
   | Toml
+[@@deriving yojson]
 
-and lisp_type = CommonLisp | Elisp | Scheme | Clojure
+and lisp_type = CommonLisp | Elisp | Scheme | Clojure [@@deriving yojson]
 
 and webpl_type =
   | Php of string
@@ -65,14 +72,18 @@ and webpl_type =
   | Coffee
   | Vue
   | Css
+  | Scss
   | Html
   | Xml
   | Opa
   | Flash
   | Sql
+[@@deriving yojson]
 
-and idl_type = Thrift | ATD | Protobuf
+and idl_type = Thrift | ATD | Protobuf [@@deriving yojson]
+
 and media_type = Sound of string | Picture of string | Video of string
+[@@deriving yojson]
 
 (* main entry point *)
 val file_type_of_file : Fpath.t -> file_type
@@ -82,8 +93,8 @@ val is_textual_file : Fpath.t -> bool
 val is_json_filename : Fpath.t -> bool
 val is_syncweb_obj_file : Fpath.t -> bool
 
-(* deprecated? *)
-val files_of_dirs_or_files : (file_type -> bool) -> Fpath.t list -> Fpath.t list
+val files_of_dirs_or_files :
+  < Cap.readdir ; .. > -> (file_type -> bool) -> Fpath.t list -> Fpath.t list
 
 (* specialisations *)
 val webpl_type_of_file : Fpath.t -> webpl_type option

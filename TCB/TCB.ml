@@ -16,6 +16,11 @@
  * to forbid access to the sensitive resource in Stdlib is to reuse the same
  * name but change the type and value to unit.
  *
+ * If you really need to use the sensitive functions/constants in Stdlib.ml,
+ * at least use the explicitely qualified UStdlib.xxx (e.g., UStdlib.exit),
+ * but if you can it is better to use the capability-aware variant in one of
+ * the CapXxx.ml file (e.g., CapStdlib.exit).
+ *
  * references:
  *  - https://en.wikipedia.org/wiki/Trusted_computing_base
  *
@@ -41,8 +46,7 @@ module Stdlib = struct end
 (*###########################################################################*)
 
 (* Stdlib.ml, which was called pervasive.ml for a long time, is [open]ed
- * implicitely in every file, so we must mask the dangerous functions
- * in it.
+ * implicitely in every file, so we must mask the dangerous functions in it.
  * I tried to keep the same order of the definitions than in Stdlib.mli
  * (and pervasive.ml) below so if new versions of OCaml introduce new
  * builtins, we can easily just go thouch each file in parallel and
@@ -334,6 +338,9 @@ let ( @ ) = ( @ )
  * See also for In: Scanf/Lexing/Parsing
  *)
 
+(* See the toplevel comment, but if you really need to use directly stdin,
+ * at least qualify it with UStdlib.stdin
+ *)
 let stdin = ()
 let stdout = ()
 let stderr = ()
@@ -476,13 +483,13 @@ type nonrec ('a, 'b) result = ('a, 'b) result
 (* Format (see also Format module) *)
 (**************************************************************************)
 
-(*
 type ('a, 'b, 'c, 'd, 'e, 'f) format6 =
   ('a, 'b, 'c, 'd, 'e, 'f) CamlinternalFormatBasics.format6
 
 type ('a, 'b, 'c, 'd) format4 = ('a, 'b, 'c, 'c, 'c, 'd) format6
 type ('a, 'b, 'c) format = ('a, 'b, 'c, 'c) format4
 
+(*
 let string_of_format = string_of_format
 
 external format_of_string :
@@ -592,8 +599,6 @@ module Buffer = Buffer
 (* only unsafe is [usage()] printing on stdout, but not worth it for now *)
 module Arg = Arg
 module Lazy = Lazy
-(* less: *)
-module Random = Random
 (* ?? *)
 module Callback = Callback
 module Digest = Digest
@@ -625,6 +630,9 @@ module Oo = struct end
 (* Other module aliases (FORBIDDEN) *)
 (*###########################################################################*)
 
+module URandom = Random
+module Random = struct end
+
 (*###########################################################################*)
 (* RESTRICTED modules *)
 (*###########################################################################*)
@@ -645,6 +653,15 @@ module Sys = struct
     | Signal_handle of (int -> unit)
 
   (* LATER? create different capabilities for each signal? *)
+  (* ref: https://faculty.cs.niu.edu/~hutchins/csci480/signals.htm *)
+  let sighup = Sys.sighup
+  let sigquit = Sys.sigquit
+
+  (* Usually paging errors...  *)
+  let sigbus = Sys.sigbus
+  let sigpipe = Sys.sigpipe
+  let sigterm = Sys.sigterm
+  let sigsys = Sys.sigsys
   let sigalrm = Sys.sigalrm
   let sigxfsz = Sys.sigxfsz
   let sigint = Sys.sigint
@@ -655,6 +672,11 @@ module Sys = struct
   type extra_info = Sys.extra_info
   type ocaml_release_info = Sys.ocaml_release_info
 
+  (* alt: keep them in USys *)
+  let unix = Sys.unix
+  let win32 = Sys.win32
+  let cygwin = Sys.cygwin
+  let int_size = Sys.int_size
   (* less: Immediate64 submodule *)
 end
 
@@ -918,8 +940,13 @@ module Filename = struct
   let is_relative = Filename.is_relative
   let quote = Filename.quote
 
+  (* "." *)
+  let current_dir_name = Filename.current_dir_name
+
+  (* ".." *)
+  let parent_dir_name = Filename.parent_dir_name
+
   (* FORBIDDEN:
-     - current_dir_name, parent_dir_name
      - temp files stuff
      - ...
   *)
@@ -994,6 +1021,7 @@ module Printf = struct
   let sprintf = Printf.sprintf
   let fprintf = Printf.fprintf
   let eprintf = Printf.eprintf
+  let bprintf = Printf.bprintf
 
   (* FORBIDDEN:
      - printf
@@ -1010,6 +1038,8 @@ module Format = struct
   let fprintf = Format.fprintf
   let sprintf = Format.sprintf
   let kfprintf = Format.kfprintf
+  let kasprintf = Format.kasprintf
+  let ikfprintf = Format.ikfprintf
 
   (* pp_xxx are safe *)
   let pp_print_int = Format.pp_print_int

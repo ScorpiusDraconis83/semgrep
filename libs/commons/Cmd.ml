@@ -12,9 +12,16 @@
 (* Types *)
 (*****************************************************************************)
 
-type name = Name of string
-type args = string list
-type t = name * args
+type name = Name of string [@@deriving show]
+type args = string list [@@deriving show]
+type t = name * args [@@deriving show]
+
+(* alt: we could also make it part of [t] and have a triple *)
+type env = { vars : (string * string) list; inherit_parent_env : bool }
+
+let env_of_list ?(inherit_parent_env = true) (vars : (string * string) list) :
+    env =
+  { vars; inherit_parent_env }
 
 (* shortcut *)
 type run_status = Bos.OS.Cmd.run_status

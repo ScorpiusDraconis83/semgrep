@@ -27,12 +27,14 @@ open Common
 
 type pattern_parser =
   string (* pattern content *) ->
-  AST_generic.any Tree_sitter_run.Parsing_result.t
+  (AST_generic.any, unit) Tree_sitter_run.Parsing_result.t
 
 type target_file_parser =
-  string (* filename *) -> AST_generic.program Tree_sitter_run.Parsing_result.t
+  Fpath.t -> (AST_generic.program, unit) Tree_sitter_run.Parsing_result.t
 
 module type T = sig
+  val is_optional : bool
+
   val register_parsers :
     parse_pattern:pattern_parser -> parse_target:target_file_parser -> unit
 
@@ -43,6 +45,7 @@ end
 
 exception Missing_plugin of string
 
+(* Table of missing plugins that are not optional *)
 let missing_plugins : (Lang.t, unit) Hashtbl.t = Hashtbl.create 10
 
 (*****************************************************************************)
@@ -52,14 +55,14 @@ let missing_plugins : (Lang.t, unit) Hashtbl.t = Hashtbl.create 10
 let missing_plugin_msg lang =
   spf
     "Missing Semgrep extension needed for parsing %s target. Try adding \
-     `--pro` to your command."
+     `--pro-languages` to your command."
     (Lang.to_string lang)
 
 let check_if_missing lang =
   if Hashtbl.mem missing_plugins lang then Error (missing_plugin_msg lang)
   else Ok ()
 
-let check_if_missing_analyzer (analyzer : Xlang.t) =
+let check_if_missing_analyzer (analyzer : Analyzer.t) =
   match analyzer with
   | LRegex
   | LSpacegrep
@@ -78,17 +81,24 @@ let check_if_missing_analyzer (analyzer : Xlang.t) =
           | Some msg -> Error msg)
       | Error _ as res -> res)
 
+let all_possible_plugins = ref []
+
 (* Create and manage the reference holding a plugin. *)
-let make lang =
+let make ?(optional = false) lang =
+  all_possible_plugins := lang :: !all_possible_plugins;
   let parsers = ref None in
-  Hashtbl.add missing_plugins lang ();
+  if not optional then Hashtbl.add missing_plugins lang ();
   let register ~parse_pattern ~parse_target =
     match !parsers with
     | None ->
         parsers := Some (parse_pattern, parse_target);
         Hashtbl.remove missing_plugins lang
     | Some _existing_parsers ->
-        (* This is a bug *)
+        (* This is a bug
+         * update: this is slightly annoying though because in tests
+         * we can call multiple time the same register function. See
+         * the note in Proprietary_parser.ml about 'already_done'
+         *)
         let msg =
           spf
             "Plugin initialization error: a %s parser is being registered \
@@ -115,18 +125,27 @@ let make lang =
         raise (Missing_plugin msg)
     | Some (_, parse_target) -> parse_target file
   in
-  (register, is_available, parse_pattern, parse_target)
+  (optional, register, is_available, parse_pattern, parse_target)
 
 (*****************************************************************************)
 (* Plugins *)
 (*****************************************************************************)
 
 module Apex = struct
-  let register_parsers, is_available, parse_pattern, parse_target =
+  let is_optional, register_parsers, is_available, parse_pattern, parse_target =
     make Lang.Apex
 end
 
+(* Parsing Csharp can be done with the default open-source parser which
+   is not as good as this one. *)
+module Csharp = struct
+  let is_optional, register_parsers, is_available, parse_pattern, parse_target =
+    make ~optional:true Lang.Csharp
+end
+
 module Elixir = struct
-  let register_parsers, is_available, parse_pattern, parse_target =
+  let is_optional, register_parsers, is_available, parse_pattern, parse_target =
     make Lang.Elixir
 end
+
+let all_possible_plugins = List.rev !all_possible_plugins

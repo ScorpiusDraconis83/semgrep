@@ -10,7 +10,7 @@ let create ?gitignore_filenames ?(higher_priority_levels = [])
     project_root;
     higher_priority_levels;
     gitignore_file_cache =
-      Gitignores_cache.create ?gitignore_filenames ~project_root ();
+      Gitignore_cache.create ?gitignore_filenames ~project_root ();
     lower_priority_levels;
   }
 
@@ -52,6 +52,7 @@ let select_one acc levels path : Gitignore.selection_event list =
           | None -> acc)
         acc level.patterns)
     acc levels
+[@@profiling]
 
 let select_path opt_gitignore_file_cache sel_events levels relative_segments =
   let rec loop sel_events levels parent_path segments =
@@ -63,7 +64,7 @@ let select_path opt_gitignore_file_cache sel_events levels relative_segments =
           match opt_gitignore_file_cache with
           | Some cache -> (
               (* load local gitignore file *)
-              match Gitignores_cache.load cache parent_path with
+              match Gitignore_cache.load cache parent_path with
               | Some additional_level -> levels @ [ additional_level ]
               | None -> levels)
           | None -> levels
@@ -103,17 +104,9 @@ let select_path opt_gitignore_file_cache sel_events levels relative_segments =
    Each time we descend into a folder, we read the .gitignore files in
    that folder which add filters to the existing filters found earlier.
 *)
-let select t sel_events (full_git_path : Ppath.t) =
-  let rel_segments =
-    match Ppath.segments full_git_path with
-    (* Remove empty line segment *)
-    | "" :: xs -> xs
-    | "/" :: _ ->
-        failwith
-          (Printf.sprintf "Gitignore: full_git_path %s not relative"
-             Ppath.(to_string full_git_path))
-    | xs -> xs
-  in
+let select t (full_git_path : Ppath.t) =
+  let sel_events = [] in
+  let rel_segments = Ppath.relative_segments full_git_path in
   (* higher levels (command-line)
      and middle levels (gitignore files discovered along the way) *)
   let sel_events =

@@ -55,7 +55,7 @@ let arg_names_of_list xs =
   match xs with
   | [] -> []
   | [ x ] -> [ (x, "v") ]
-  | xs -> List.mapi (fun i x -> (x, sprintf "v%i" (i + 1))) xs
+  | xs -> List_.mapi (fun i x -> (x, sprintf "v%i" (i + 1))) xs
 
 (* Create tuple pattern or expression:
      "()"
@@ -113,7 +113,7 @@ let rec func_for_type (conf : Conf.t) (typ : type_) : out list * string =
   | TyVar _ -> ([], "TODOTyVar")
   | TyAny _ -> error "TyAny not handled"
   | TyFunction _ -> ([], "TODOTyFunction")
-  | TyApp ([ ty ], name) ->
+  | TyApp ((_, [ ty ], _), name) ->
       let s1 = func_for_name conf name in
       let def, s2 = func_for_type conf ty in
       (def, sprintf "(%s %s)" s1 s2)
@@ -126,7 +126,7 @@ let rec func_for_type (conf : Conf.t) (typ : type_) : out list * string =
           (TyDecl
              {
                tname = (local_name, Tok.unsafe_sc);
-               tparams = [];
+               tparams = None;
                tbody = CoreType typ;
              })
       in
@@ -198,7 +198,7 @@ and gen_case conf (id, xs) =
         let is_last idx = idx = n_args - 1 in
         let arg_handlers =
           xs
-          |> List.mapi (fun i (typ, var) ->
+          |> List_.mapi (fun i (typ, var) ->
                  let def, call_str = func_for_type conf typ in
                  Inline
                    [
@@ -276,7 +276,7 @@ and gen_tuple conf types =
   | Visit ->
       let len = List.length types in
       types
-      |> List.mapi (fun i (type_, var) ->
+      |> List_.mapi (fun i (type_, var) ->
              let def, call_str = func_for_type conf type_ in
              Inline
                [
@@ -296,7 +296,7 @@ let gen_typedef_group conf typedefs =
         true)
       else false
   in
-  (* Common.map would work but doesn't guarantee left-to-right evaluation :-( *)
+  (* List_.map would work but doesn't guarantee left-to-right evaluation :-( *)
   List.fold_left
     (fun acc x -> Inline (gen_typedef conf (is_first ()) x) :: acc)
     [] typedefs

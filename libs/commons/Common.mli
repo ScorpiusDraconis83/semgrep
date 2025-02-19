@@ -1,10 +1,10 @@
 (*****************************************************************************)
 (* Prelude *)
 (*****************************************************************************)
-(* This module contains functions (and types) which are very often used.
+(* This module contains functions which are very often used.
  * They are so common (hence the name of this file) that lots of modules
  * just 'open Common' to get in scope those functions.
- * This file acts like a second stdlib.ml.
+ * This file acts like a second stdlib.ml (which was called pervasives.ml before)
  *
  * However, because this module is often open'ed, it should
  * not define too many functions (<100) because we can't impose
@@ -18,35 +18,17 @@
 (*****************************************************************************)
 
 (* You should not use the polymorphic '='. It is convenient but
- * its use will eventually backfire. You should use instead 'deriving eq'
- * where the equality function can be customized.
- * To enforce this rule, this module redefines '=' to just operate
- * on strings, so ocaml can statically detect when you wrongly use '='
+ * its use will eventually backfire
+ * (see https://blog.janestreet.com/the-perils-of-polymorphic-compare/).
+ * You should use instead 'deriving eq' where the equality function can be
+ * customized. To enforce this rule, this module redefines '=' to just operate
+ * on strings, so ocamlc can statically detect when you wrongly use '='
  * on other types.
  *
  * See also the Operators submodule at the end of this file.
  *)
-val ( = ) : string -> string -> bool
 
-(* If you need to use '=', at least use the more precise operators below. *)
-val ( =|= ) : int -> int -> bool
-val ( =$= ) : char -> char -> bool
-val ( =:= ) : bool -> bool -> bool
-
-(* if you really really need to use the polymorphic '=', at least use
- * the operator below so it's easier to grep for it if one needs to refactor
- * the code to use 'deriving eq' instead.
- *)
-val ( =*= ) : 'a -> 'a -> bool
-
-val equal_ref_option :
-  ('a -> 'b -> bool) -> 'a option ref -> 'b option ref -> bool
-
-(*
-   Disable the use of (==) since some people confuse it with structural
-   equality. We do this here since we're disabling in with semgrep anyway
-   and it's quicker if the compiler can report it.
-*)
+include module type of Eq.Operators
 
 (* Physical (shallow) equality, normally available as (==) *)
 val phys_equal : 'a -> 'a -> bool
@@ -54,33 +36,13 @@ val phys_equal : 'a -> 'a -> bool
 (* Physical (shallow) inequality, normally available as (!=) *)
 val phys_not_equal : 'a -> 'a -> bool
 
-type hidden_by_your_nanny
-
-val ( == ) : hidden_by_your_nanny
-val ( != ) : hidden_by_your_nanny
+val equal_ref_option :
+  ('a -> 'b -> bool) -> 'a option ref -> 'b option ref -> bool
 
 (*****************************************************************************)
 (* Comparison *)
 (*****************************************************************************)
-
-type order = Less | Equal | Greater
-
-val binary_search_arr :
-  f:(int -> 'a -> order) -> 'a array -> (int * 'a, int) result
-(** [binary_search_arr f A] returns Ok (idx, x) if the element x can be found
-    at idx x, according to comparison function f.
-    Otherwise, it returns Error idx, where idx is the index that the element
-    must be inserted at, if it were to be in the array.
-    For instance, when searching for 2 in [|0, 3|], we get Error 1.
-    Inserting at the beginning is Error 0, and at the end is Error 2.
-  *)
-
-val binary_search_bigarr1 :
-  f:(int -> 'a -> order) ->
-  ('a, 'b, 'c) Bigarray.Array1.t ->
-  (int * 'a, int) result
-
-val to_comparison : ('a -> 'a -> int) -> 'a -> 'a -> order
+(* now in Ord.ml *)
 
 (*****************************************************************************)
 (* Composition/Control *)
@@ -101,7 +63,7 @@ val on : ('b -> 'b -> 'c) -> ('a -> 'b) -> 'a -> 'a -> 'c
 (* Exceptions *)
 (*****************************************************************************)
 (* see also Exception.ml functions as well as Time_limit.Timeout
- * in the process_limits library.
+ * and Memory_limit.ExceededMemoryLimit in the process_limits library.
  *)
 
 exception Todo
@@ -111,6 +73,12 @@ exception Impossible
 
 (* similar to Not_found but to use when something returns too many findings *)
 exception Multi_found
+
+(* it's usually far easier to diagnose an error when you know on which
+ * file it occured. An [Invalid_argument("index out of bounds")] is not
+ * as good as [ErrorOnFile("out of bounds in lines_of_file()", 'foo.c')]
+ *)
+exception ErrorOnFile of string (* error message *) * Fpath.t
 
 (* If the user use some [exit 0] in his code, then no one can intercept this
  * exit and do something before exiting. There is exn handler for exit 0
@@ -248,6 +216,14 @@ val ( let* ) : 'a option -> ('a -> 'b option) -> 'b option
 val ( ||| ) : 'a option -> 'a -> 'a
 
 (*****************************************************************************)
+(* Result *)
+(*****************************************************************************)
+
+(* similar to let* above but for Result instead of Option *)
+val ( let/ ) :
+  ('a, 'e) Result.t -> ('a -> ('b, 'e) Result.t) -> ('b, 'e) Result.t
+
+(*****************************************************************************)
 (* Either *)
 (*****************************************************************************)
 (* Now in Either_.mli *)
@@ -292,8 +268,8 @@ module Operators : sig
   val ( =$= ) : char -> char -> bool
   val ( =:= ) : bool -> bool -> bool
   val ( =*= ) : 'a -> 'a -> bool
-  val ( == ) : hidden_by_your_nanny
-  val ( != ) : hidden_by_your_nanny
+  val ( == ) : Eq.hidden_by_your_nanny
+  val ( != ) : Eq.hidden_by_your_nanny
 end
 
 (*****************************************************************************)

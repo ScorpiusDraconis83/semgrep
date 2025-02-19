@@ -23,23 +23,18 @@ val make_login_url : unit -> login_session
 
 (* need the network to first check whether the token is valid *)
 val save_token_async :
-  ?ident:string option ->
+  ?ident:string ->
   < network : Cap.Network.t ; token : Auth.token > ->
   (Semgrep_output_v1_t.deployment_config, string) result Lwt.t
 
 val save_token :
-  ?ident:string option ->
+  ?ident:string ->
   < network : Cap.Network.t ; token : Auth.token > ->
   (Semgrep_output_v1_t.deployment_config, string) result
 (** [save_token ?ident token] will save the token to the user's settings file.
   * If it fails, it will return an error message.
   * [ident] is the login identifier that can be used as an opaque UUID once
   * hashed [token] (auth token) is the token to save for future API calls
-  *)
-
-val is_logged_in : unit -> bool
-(** [is_logged_in ()] will check if the user is logged in by checking if a
-  * token in the settings file exists.
   *)
 
 val fetch_token :
@@ -62,7 +57,7 @@ val fetch_token_async :
   ?min_wait_ms:int ->
   ?next_wait_ms:int ->
   ?max_retries:int ->
-  ?wait_hook:(int -> unit) ->
+  ?wait_hook:(int -> unit Lwt.t) ->
   < network : Cap.Network.t ; .. > ->
   shared_secret ->
   (Auth.token * string, string) result Lwt.t
@@ -81,3 +76,9 @@ val verify_token_async :
 
 val verify_token : < network : Cap.Network.t ; token : Auth.token > -> bool
 (** [verify_token] verifies that a token is valid with the Semgrep App. *)
+
+val is_logged_in_weak : unit -> bool
+(** this does not really check whether the user is logged in; it just checks
+ * whether a token is defined in ~/.semgrep/settings.yml (or in
+ * SEMGREP_APP_TOKEN.
+ *)

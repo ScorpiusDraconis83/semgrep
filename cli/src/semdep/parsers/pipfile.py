@@ -9,19 +9,27 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
+import semgrep.semgrep_interfaces.semgrep_output_v1 as out
+from semdep.external.parsy import any_char
 from semdep.external.parsy import regex
+from semdep.external.parsy import string
 from semdep.parsers import preprocessors
-from semdep.parsers.poetry import key_value
+from semdep.parsers.poetry import key
+from semdep.parsers.poetry import list_value
+from semdep.parsers.poetry import multi_line_quoted_value
+from semdep.parsers.poetry import object_value
+from semdep.parsers.poetry import plain_value
 from semdep.parsers.util import DependencyFileToParse
 from semdep.parsers.util import DependencyParserError
 from semdep.parsers.util import json_doc
+from semdep.parsers.util import mark_line
 from semdep.parsers.util import pair
 from semdep.parsers.util import safe_parse_lockfile_and_manifest
 from semdep.parsers.util import transitivity
+from semdep.parsers.util import upto
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
 from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
-from semgrep.semgrep_interfaces.semgrep_output_v1 import Jsondoc
-from semgrep.semgrep_interfaces.semgrep_output_v1 import Pipfile
+from semgrep.semgrep_interfaces.semgrep_output_v1 import Fpath
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Pypi
 from semgrep.semgrep_interfaces.semgrep_output_v1 import ScaParserName
 from semgrep.verbose_logging import getLogger
@@ -29,20 +37,44 @@ from semgrep.verbose_logging import getLogger
 
 logger = getLogger(__name__)
 
+quoted_value = (
+    string('"')
+    >> any_char.until(string('"\n')).concat().map(lambda x: x.strip('"'))
+    << string('"')
+)
+
+value = multi_line_quoted_value | list_value | object_value | quoted_value | plain_value
+key_value = pair(key, value)
+
 
 manifest_block = pair(
-    regex(r"\[(.*)\]\n+", flags=0, group=1), key_value.sep_by(regex(r"\n+"))
+    regex(r"\[(.*)\]\n", flags=0, group=1), key_value.sep_by(regex(r"\n+"))
+)
+
+new_lines = regex("\n+")
+key_value_list = mark_line(key_value).sep_by(new_lines)
+
+manifest_deps = (
+    (string("[packages]") | string("[dev-packages]"))
+    << new_lines.optional()
+    >> key_value.map(lambda x: x[0]).sep_by(new_lines)
+)
+
+manifest_sections_extra = (
+    (
+        string("[") >> upto("]") << string("]\n")
+        | (string("[[") >> upto("]]") << string("]]\n"))
+    ).at_least(1)
+    >> new_lines.optional()
+    >> key_value_list.map(lambda _: None)
 )
 
 manifest = (
-    manifest_block.map(
-        lambda block: None
-        if block[0] not in ["packages", "dev-packages"]
-        else {x[0] for x in block[1]}
-    )
-    .sep_by(regex(r"\n+").at_least(1))
+    string("\n").many()
+    >> (manifest_deps | manifest_sections_extra)
+    .sep_by(new_lines.optional())
     .map(lambda sets: {x for s in sets if s for x in s})
-    << regex(r"\n+").optional()
+    << new_lines.optional()
 )
 
 
@@ -50,11 +82,11 @@ def parse_pipfile(
     lockfile_path: Path, manifest_path: Optional[Path]
 ) -> Tuple[List[FoundDependency], List[DependencyParserError]]:
     parsed_lockfile, parsed_manifest, errors = safe_parse_lockfile_and_manifest(
-        DependencyFileToParse(lockfile_path, json_doc, ScaParserName(Jsondoc())),
+        DependencyFileToParse(lockfile_path, json_doc, ScaParserName(out.PJsondoc())),
         DependencyFileToParse(
             manifest_path,
             manifest,
-            ScaParserName(Pipfile()),
+            ScaParserName(out.PPipfile()),
             preprocessors.CommentRemover(),
         )
         if manifest_path
@@ -109,6 +141,8 @@ def parse_pipfile(
                     sanitized_manifest_deps, [package.lower().replace("-", "_")]
                 ),
                 line_number=dep_json.line_number,
+                lockfile_path=Fpath(str(lockfile_path)),
+                manifest_path=Fpath(str(manifest_path)) if manifest_path else None,
             )
         )
     return output, errors

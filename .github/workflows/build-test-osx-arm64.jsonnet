@@ -6,33 +6,25 @@ local osx_x86 = import 'build-test-osx-x86.jsonnet';
 local actions = import 'libs/actions.libsonnet';
 local semgrep = import 'libs/semgrep.libsonnet';
 
+local wheel_name = 'osx-arm64-wheel';
+
 // ----------------------------------------------------------------------------
 // Helpers
 // ----------------------------------------------------------------------------
-local runs_on = [
-  'self-hosted',
-  'macOS',
-  'ARM64',
-  'ghcr.io/cirruslabs/macos-monterey-xcode:latest',
-];
+local runs_on = 'macos-latest';
 
-local setup_runner_step = {
-  name: 'Setup runner directory',
-  run: |||
-    sudo mkdir /Users/runner
-    sudo chown admin:staff /Users/runner
-    sudo chmod 750 /Users/runner
-  |||,
-};
-
-// Our self-hosted runner do not come with python pre-installed
-// TODO? reuse actions.setup_python?
-local setup_python_step = {
-  uses: 'actions/setup-python@v4',
+// Our self-hosted runner do not come with python pre-installed.
+//
+// Note that we can't reuse actions.setup_python because it comes with the
+// cache: 'pipenv' which then trigger failures when we don't checkout any code
+// and there's no code with a Pipfile.lock
+local setup_python_step =  {
+  uses: 'actions/setup-python@v5',
   with: {
-    'python-version': '3.11',
-  },
+    'python-version': semgrep.python_version,
+  }
 };
+
 
 // ----------------------------------------------------------------------------
 // The jobs
@@ -41,39 +33,34 @@ local setup_python_step = {
 // alt: we could factorize more with build-test-osx-x86.jsonnet by making
 // the xxx_job functions, but let's copy paste a bit for now.
 local artifact_name = 'semgrep-osx-arm64-${{ github.sha }}';
-local wheel_name = 'osx-arm64-wheel';
 
 local build_core_job = {
   'runs-on': runs_on,
-  env: {
-    OPAM_SWITCH_NAME: semgrep.opam_switch,
-  },
   steps: [
-    setup_runner_step,
     setup_python_step,
     actions.checkout_with_submodules(),
-    osx_x86.export.cache.cache_opam_step,
+    // TODO: like for osx-x86, we should use opam.lock
+    semgrep.cache_opam.step(
+       key=semgrep.opam_switch + "-${{hashFiles('semgrep.opam')}}")
+     + semgrep.cache_opam.if_cache_inputs,
     // exactly the same than in build-test-oxs-x86.jsonnet
+    semgrep.opam_setup(),
     {
       name: 'Install dependencies',
-      run: './scripts/osx-setup-for-release.sh "${{ env.OPAM_SWITCH_NAME }}"',
-    },
-    {
-      name: 'Compile semgrep',
       run: |||
-        opam exec -- make core
-        mkdir -p artifacts
-        cp ./bin/semgrep-core artifacts
-        zip -r artifacts.zip artifacts
+        make install-deps-MACOS-for-semgrep-core
       |||,
     },
     {
-      uses: 'actions/upload-artifact@v3',
-      with: {
-        path: 'artifacts.zip',
-        name: artifact_name,
-      },
+      name: 'Compile semgrep',
+      run: "opam exec -- make core",
     },
+    actions.make_artifact_step("./bin/semgrep-core"),
+    actions.upload_artifact_step(artifact_name),
+    {
+      name: 'Test semgrep-core',
+      run: 'opam exec -- make core-test',
+    }
   ],
 };
 
@@ -83,25 +70,20 @@ local build_wheels_job = {
     'build-core',
   ],
   steps: [
-    setup_runner_step,
     setup_python_step,
+    // needed for ./script/build-wheels.sh below
     actions.checkout_with_submodules(),
-    {
-      uses: 'actions/download-artifact@v3',
-      with: {
-        name: artifact_name,
-      },
-    },
+    actions.download_artifact_step(artifact_name),
     // the --plat-name is macosx_11_0_arm64 here!
     {
       run: |||
-        unzip artifacts.zip
+        tar xvfz artifacts.tgz
         cp artifacts/semgrep-core cli/src/semgrep/bin
         ./scripts/build-wheels.sh --plat-name macosx_11_0_arm64
       |||,
     },
     {
-      uses: 'actions/upload-artifact@v3',
+      uses: 'actions/upload-artifact@v4',
       with: {
         path: 'cli/dist.zip',
         name: wheel_name,
@@ -116,16 +98,10 @@ local test_wheels_job = {
     'build-wheels',
   ],
   steps: [
-    setup_runner_step,
     setup_python_step,
+    actions.download_artifact_step(wheel_name),
     {
-      uses: 'actions/download-artifact@v1',
-      with: {
-        name: wheel_name,
-      },
-    },
-    {
-      run: 'unzip ./osx-arm64-wheel/dist.zip',
+      run: 'unzip dist.zip',
     },
     {
       name: 'install package',
@@ -141,8 +117,8 @@ local test_wheels_job = {
 {
   name: 'build-test-osx-arm64',
   on: {
-    workflow_dispatch: osx_x86.export.cache.use_cache_inputs(required=true),
-    workflow_call: osx_x86.export.cache.use_cache_inputs(required=false),
+    workflow_dispatch: semgrep.cache_opam.inputs(required=true),
+    workflow_call: semgrep.cache_opam.inputs(required=false),
   },
   jobs: {
     'build-core': build_core_job,

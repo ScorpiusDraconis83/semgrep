@@ -8,6 +8,7 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
+import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semdep.external.parsy import regex
 from semdep.external.parsy import string
 from semdep.parsers.util import consume_line
@@ -20,8 +21,8 @@ from semgrep.semgrep_interfaces.semgrep_output_v1 import DependencyChild
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Direct
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
 from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
+from semgrep.semgrep_interfaces.semgrep_output_v1 import Fpath
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Maven
-from semgrep.semgrep_interfaces.semgrep_output_v1 import Pomtree
 from semgrep.semgrep_interfaces.semgrep_output_v1 import ScaParserName
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Transitive
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Transitivity
@@ -109,10 +110,10 @@ def get_children(deps: List[Any]) -> List[ParsedDependency]:
 
 
 def parse_pom_tree(
-    tree_path: Path, _: Optional[Path]
+    tree_path: Path, manifest_path: Optional[Path]
 ) -> Tuple[List[FoundDependency], List[DependencyParserError]]:
     parsed_lockfile, parsed_manifest, errors = safe_parse_lockfile_and_manifest(
-        DependencyFileToParse(tree_path, pom_tree, ScaParserName(Pomtree())),
+        DependencyFileToParse(tree_path, pom_tree, ScaParserName(out.PPomtree())),
         None,
     )
     if not parsed_lockfile:
@@ -137,6 +138,8 @@ def parse_pom_tree(
                 transitivity=match.transitivity,
                 line_number=match.line_number,
                 children=match.children,
+                lockfile_path=Fpath(str(tree_path)),
+                manifest_path=Fpath(str(manifest_path)) if manifest_path else None,
             )
         )
     return output, errors

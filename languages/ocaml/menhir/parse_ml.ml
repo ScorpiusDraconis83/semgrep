@@ -13,9 +13,11 @@
  *
  *)
 open Common
+open Fpath_.Operators
 module Flag = Flag_parsing
 module TH = Token_helpers_ml
 module PS = Parsing_stat
+module Log = Log_lib_parsing.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -38,6 +40,7 @@ let tokens input_source =
 (* Main entry point *)
 (*****************************************************************************)
 let parse filename =
+  let filename = !!filename in
   let stat = Parsing_stat.default_stat filename in
   let toks = tokens (Parsing_helpers.file filename) in
 
@@ -62,11 +65,14 @@ let parse filename =
         raise (Parsing_error.Syntax_error (TH.info_of_tok cur));
 
       if !Flag.show_parsing_error then (
-        UCommon.pr2 ("parse error \n = " ^ error_msg_tok cur);
+        Log.err (fun m -> m "parse error \n = %s" (error_msg_tok cur));
         let filelines = UFile.cat_array (Fpath.v filename) in
-        let checkpoint2 = UCommon.cat filename |> List.length in
+        let checkpoint2 = UFile.Legacy.cat filename |> List.length in
         let line_error = TH.line_of_tok cur in
-        Parsing_helpers.print_bad line_error (0, checkpoint2) filelines);
+        Log.err (fun m ->
+            m "%s"
+              (Parsing_helpers.show_parse_error_line line_error (0, checkpoint2)
+                 filelines)));
 
       stat.PS.error_line_count <- stat.PS.total_line_count;
       { Parsing_result.ast = []; tokens = toks; stat }

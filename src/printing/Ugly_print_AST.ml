@@ -1,6 +1,6 @@
 (* Nat Mote
  *
- * Copyright (C) 2019-2022 r2c
+ * Copyright (C) 2019-2022 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -124,8 +124,6 @@ end
 (* Helpers *)
 (*****************************************************************************)
 
-let ( let/ ) = Result.bind
-
 (* Ok if and only if `f` returns `Ok for all elements. Short circuits when
  * the first `Error is encountered.
  *
@@ -202,7 +200,7 @@ class base_printer : printer_t =
       match e.G.e with
       (* Binary operator expressions are desugared to calls, but are different
        * enough that they merit a separate method here. *)
-      | G.IdSpecial (G.Op _, _) -> self#print_opcall e args
+      | G.Special (G.Op _, _) -> self#print_opcall e args
       (* TODO also handle other kinds of IdSpecial *)
       | _ -> self#print_ordinary_call e args
 
@@ -216,7 +214,7 @@ class base_printer : printer_t =
      * actually needed. *)
     method private needs_parens =
       function
-      | G.E { e = G.Call ({ e = G.IdSpecial (G.Op _, _); _ }, _); _ } -> true
+      | G.E { e = G.Call ({ e = G.Special (G.Op _, _); _ }, _); _ } -> true
       | _ -> false
 
     method private add_parens_if_needed any res =
@@ -261,6 +259,7 @@ class virtual common_printer =
       function
       | G.Id (ident, _) -> self#print_ident ident
       | G.IdQualified _ -> print_fail ()
+      | G.IdSpecial _ -> print_fail ()
 
     method print_ident (str, _) = Ok (b str)
 
@@ -306,4 +305,9 @@ class jsts_printer : printer_t =
   object (_self)
     inherit base_printer
     inherit! common_printer
+  end
+
+class ocaml_printer : printer_t =
+  object (_self)
+    inherit base_printer
   end

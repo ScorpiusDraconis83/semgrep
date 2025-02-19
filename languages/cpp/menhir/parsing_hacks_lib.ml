@@ -18,8 +18,7 @@ module Flag_cpp = Flag_parsing_cpp
 module TH = Token_helpers_cpp
 open Parser_cpp
 open Token_views_cpp
-
-let logger = Logging.get_logger [ __MODULE__ ]
+module Log = Log_parser_cpp.Log
 
 (*****************************************************************************)
 (* Helpers  *)
@@ -44,9 +43,13 @@ let pos ii = Tok.stringpos_of_tok ii
 (* Some debugging functions  *)
 (*****************************************************************************)
 
-let pr2_pp s = if !Flag_cpp.debug_pp then logger#sinfo ("PP-" ^ s)
-let pr2_cplusplus s = if !Flag_cpp.debug_cplusplus then logger#sinfo ("C++-" ^ s)
-let pr2_typedef s = if !Flag_cpp.debug_typedef then logger#sinfo ("TYPEDEF-" ^ s)
+let pr2_pp s = if !Flag_cpp.debug_pp then Log.debug (fun m -> m "PP-%s" s)
+
+let pr2_cplusplus s =
+  if !Flag_cpp.debug_cplusplus then Log.debug (fun m -> m "C++-%s" s)
+
+let pr2_typedef s =
+  if !Flag_cpp.debug_typedef then Log.debug (fun m -> m "TYPEDEF-%s" s)
 
 let msg_change_tok tok =
   match tok with
@@ -216,7 +219,7 @@ let change_tok extended_tok tok =
    * some ifdef-exp?
    *)
   if TH.is_eof extended_tok.t then
-    logger#error "PB: wierd, I try to tag an EOF token as something else"
+    Log.warn (fun m -> m "WEIRD, I try to tag an EOF token as something else")
   else extended_tok.t <- tok
 
 let fresh_tok tok =

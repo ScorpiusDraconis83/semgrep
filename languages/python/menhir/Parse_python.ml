@@ -1,7 +1,7 @@
 (* Yoann Padioleau
  *
  * Copyright (C) 2010 Facebook
- * Copyright (C) 2019 r2c
+ * Copyright (C) 2019 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -14,11 +14,13 @@
  *
  *)
 open Common
+open Fpath_.Operators
 module Flag = Flag_parsing
 module TH = Token_helpers_python
 module PS = Parsing_stat
 module Lexer = Lexer_python
 module T = Parser_python
+module Log = Log_lib_parsing.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -93,11 +95,11 @@ let tokens parsing_mode input_source =
 (* Main entry point *)
 (*****************************************************************************)
 
-let rec parse ?(parsing_mode = Python) filename =
-  let stat = Parsing_stat.default_stat filename in
+let rec parse ?(parsing_mode = Python) (filename : Fpath.t) =
+  let stat = Parsing_stat.default_stat !!filename in
 
   (* this can throw Parse_info.Lexical_error *)
-  let toks = tokens parsing_mode (Parsing_helpers.file filename) in
+  let toks = tokens parsing_mode (Parsing_helpers.file !!filename) in
   let toks = Parsing_hacks_python.fix_tokens toks in
 
   let tr, lexer, lexbuf_fake =
@@ -150,12 +152,14 @@ let rec parse ?(parsing_mode = Python) filename =
           raise (Parsing_error.Syntax_error (TH.info_of_tok cur));
 
         if !Flag.show_parsing_error then (
-          UCommon.pr2 ("parse error \n = " ^ error_msg_tok cur);
-
-          let filelines = UFile.cat_array (Fpath.v filename) in
-          let checkpoint2 = UCommon.cat filename |> List.length in
+          Log.err (fun m -> m "parse error \n = %s" (error_msg_tok cur));
+          let filelines = UFile.cat_array filename in
+          let checkpoint2 = UFile.cat filename |> List.length in
           let line_error = Tok.line_of_tok (TH.info_of_tok cur) in
-          Parsing_helpers.print_bad line_error (0, checkpoint2) filelines);
+          Log.err (fun m ->
+              m "%s"
+                (Parsing_helpers.show_parse_error_line line_error
+                   (0, checkpoint2) filelines)));
         stat.PS.error_line_count <- stat.PS.total_line_count;
         { Parsing_result.ast = []; tokens = toks; stat }
 [@@profiling]
@@ -168,9 +172,8 @@ let parse_program ?parsing_mode file =
 (* Sub parsers *)
 (*****************************************************************************)
 
-let (program_of_string : string -> AST_python.program) =
- fun s ->
-  Common2.with_tmp_file ~str:s ~ext:"py" (fun file -> parse_program file)
+let program_of_string (caps : < Cap.tmp >) (s : string) : AST_python.program =
+  CapTmp.with_temp_file caps#tmp ~contents:s ~suffix:".py" parse_program
 
 let type_of_string ?(parsing_mode = Python) s =
   let lexbuf = Lexing.from_string s in

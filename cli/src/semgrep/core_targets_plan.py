@@ -2,14 +2,11 @@
 # Prelude
 ##############################################################################
 # Generate what will be passed to semgrep-core via --targets
-# and specified in Input_to_core.atd
+# and specified now in semgrep_output_v1.atd
 import collections
 from functools import lru_cache
-from pathlib import Path
-from typing import Any
 from typing import DefaultDict
 from typing import Dict
-from typing import FrozenSet
 from typing import List
 from typing import Mapping
 from typing import Optional
@@ -21,6 +18,7 @@ from attr import field
 from attr import frozen
 from boltons.iterutils import get_path
 from rich import box
+from rich.style import Style
 from rich.table import Table
 
 import semgrep.semgrep_interfaces.semgrep_output_v1 as out
@@ -28,6 +26,8 @@ from semgrep.rule import Rule
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
 from semgrep.semgrep_types import Language
 from semgrep.state import get_state
+from semgrep.subproject import get_display_paths
+from semgrep.subproject import ResolvedSubproject
 from semgrep.verbose_logging import getLogger
 
 logger = getLogger(__name__)
@@ -39,7 +39,7 @@ logger = getLogger(__name__)
 @frozen
 class Task:
     path: str = field(converter=str)
-    analyzer: Language  # Xlang; see Xlang.mli
+    analyzer: Language  # Analyzer; see Analyzer.mli
     products: Tuple[out.Product, ...]
     # semgrep-core no longer uses the rule_nums field.
     # We're keeping it for now because it's needed by
@@ -55,12 +55,18 @@ class Task:
             else self.analyzer.definition.id
         )
 
-    def to_json(self) -> Any:
-        return {
-            "path": self.path,
-            "analyzer": self.analyzer,
-            "products": tuple(x.to_json() for x in self.products),
-        }
+    def to_target(self) -> out.Target:
+        # Once we start sending supply chain rules to semgrep-core,
+        # we'll need to start sending LockfileTargets as well
+        return out.Target(
+            out.CodeTarget_(
+                out.CodeTarget(
+                    path=out.Fpath(self.path),
+                    analyzer=out.Analyzer(self.analyzer),
+                    products=list(self.products),
+                )
+            )
+        )
 
 
 class TargetMappings(List[Task]):
@@ -70,7 +76,14 @@ class TargetMappings(List[Task]):
 
     @property
     def file_count(self) -> int:
-        return len(self)
+        # the '<multilang>' label is reserved for regex & generic
+        # (& others like secrets), which causes a double count
+        # in the number of files.
+        if not self[0].language_label == "<multilang>":
+            return len(self)
+        else:
+            lang_count = len({task.analyzer.definition.id for task in self})
+            return len(self) // lang_count
 
 
 @define
@@ -86,7 +99,7 @@ class Plan:
     """
     Saves and displays knowledge of what will be run
 
-    to_json: creates the json passed to semgrep_core - see Input_to_core.atd
+    to_json: creates the json passed to semgrep_core -
     log: outputs a summary of how many files will be scanned for each file
     """
 
@@ -96,7 +109,7 @@ class Plan:
         rules: List[Rule],
         *,
         product: Optional[out.Product] = None,
-        lockfiles_by_ecosystem: Optional[Dict[Ecosystem, FrozenSet[Path]]] = None,
+        sca_subprojects: Optional[Dict[out.Ecosystem, List[ResolvedSubproject]]] = None,
         unused_rules: Optional[List[Rule]] = None,
     ):
         self.target_mappings = TargetMappings(mappings)
@@ -104,7 +117,7 @@ class Plan:
         # target_mappings relies on the index of each rule_id in rule_ids
         self.rules = rules
         self.product = product
-        self.lockfiles_by_ecosystem = lockfiles_by_ecosystem
+        self.sca_subprojects = sca_subprojects
         self.unused_rules = unused_rules or []
 
     # TODO: make this counts_by_lang_label, returning TaskCounts
@@ -164,19 +177,22 @@ class Plan:
 
         # if a rule scans npm and maven, but we only have npm lockfiles,
         # then we skip mentioning maven in debug info by deleting maven's counts
-        if self.lockfiles_by_ecosystem is not None:
+        if self.sca_subprojects is not None:
             unused_ecosystems = {
                 ecosystem
                 for ecosystem in result
-                if not self.lockfiles_by_ecosystem.get(ecosystem)
+                if not self.sca_subprojects.get(ecosystem)
             }
             for ecosystem in unused_ecosystems:
                 del result[ecosystem]
 
         return result
 
-    def to_json(self) -> List[Any]:
-        return [task.to_json() for task in self.target_mappings]
+    def to_targets(self) -> out.Targets:
+        """Produce the input to semgrep-core in the form of a list of target files"""
+        return out.Targets(
+            out.Targets_([task.to_target() for task in self.target_mappings])
+        )
 
     @property
     def num_targets(self) -> int:
@@ -190,11 +206,17 @@ class Plan:
                     rule_nums.add(rule_num)
         return len(rule_nums)
 
-    def table_by_language(self, with_tables_for: Optional[out.Product] = None) -> Table:
+    def table_by_language(
+        self, with_tables_for: Optional[out.Product] = None, use_color: bool = True
+    ) -> Table:
         table = Table(box=box.SIMPLE_HEAD, show_edge=False)
-        table.add_column("Language")
-        table.add_column("Rules", justify="right")
-        table.add_column("Files", justify="right")
+        table.add_column("Language", header_style=Style(color=None, bold=use_color))
+        table.add_column(
+            "Rules", justify="right", header_style=Style(color=None, bold=use_color)
+        )
+        table.add_column(
+            "Files", justify="right", header_style=Style(color=None, bold=use_color)
+        )
 
         plans_by_language = sorted(
             self.split_by_lang_label_for_product(with_tables_for).items(),
@@ -221,10 +243,11 @@ class Plan:
             key=lambda x: (x[1].files, x[1].rules),
             reverse=True,
         ):
-            if self.lockfiles_by_ecosystem is not None:
+            if self.sca_subprojects is not None:
                 lockfile_paths = ", ".join(
-                    str(lockfile)
-                    for lockfile in self.lockfiles_by_ecosystem.get(ecosystem, [])
+                    str(lockfile_path)
+                    for proj in self.sca_subprojects.get(ecosystem, [])
+                    for lockfile_path in get_display_paths(proj.dependency_source)
                 )
             else:
                 lockfile_paths = "N/A"
@@ -238,10 +261,14 @@ class Plan:
 
         return table
 
-    def table_by_origin(self, with_tables_for: Optional[out.Product] = None) -> Table:
+    def table_by_origin(
+        self, with_tables_for: Optional[out.Product] = None, use_color: bool = True
+    ) -> Table:
         table = Table(box=box.SIMPLE_HEAD, show_edge=False)
-        table.add_column("Origin")
-        table.add_column("Rules", justify="right")
+        table.add_column("Origin", header_style=Style(color=None, bold=use_color))
+        table.add_column(
+            "Rules", justify="right", header_style=Style(color=None, bold=use_color)
+        )
 
         origin_counts = collections.Counter(
             get_path(rule.metadata, ("semgrep.dev", "rule", "origin"), default="custom")

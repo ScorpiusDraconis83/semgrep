@@ -1,3 +1,5 @@
+local common = import 'common.libsonnet';
+
 // helpers
 local unix_funcs = [
   'system',
@@ -34,16 +36,13 @@ local unix_funcs = [
           // Feather
           ['Feather.run'] +
           // UCmd
-          //  TODO, especially cmd_to_list
+	  ['UCmd.$F'] +
           [],
       },
       languages: ['ocaml'],
       paths: {
-        exclude: [
-           'TCB/*',
-           'tools/*', 'scripts/*', 'stats/*',
-           'Test*.ml',  'Unit_*.ml',
-        ],
+	// TODO: fix Git_wrapper.ml
+	exclude: common.exclude_paths + ["CapExec.ml", "Git_wrapper.ml"]
       },
       severity: 'ERROR',
       message: |||

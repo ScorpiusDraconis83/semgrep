@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2019-2021 r2c
+ * Copyright (C) 2019-2021 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -26,7 +26,7 @@ module Eq = Equivalence
 
 let match_e_e_for_equivalences _ruleid env a b =
   Common.save_excursion Flag.equivalence_mode true (fun () ->
-      Generic_vs_generic.m_expr_root a b env)
+      Pattern_vs_code.m_expr_root a b env)
 
 (*****************************************************************************)
 (* Substituters *)
@@ -38,7 +38,7 @@ let subst_e (bindings : MV.bindings) e =
 
       method! visit_expr env x =
         match x.e with
-        | N (Id ((str, _tok), _id_info)) when MV.is_metavar_name str -> (
+        | N (Id ((str, _tok), _id_info)) when Mvar.is_metavar_name str -> (
             match List.assoc_opt str bindings with
             | Some (MV.Id (id, Some idinfo)) ->
                 (* less: abstract-line? *)
@@ -114,11 +114,7 @@ let apply equivs lang any =
     end
   in
   let config =
-    {
-      Rule_options.default_config with
-      go_deeper_expr = false;
-      go_deeper_stmt = false;
-    }
+    { Rule_options.default with go_deeper_expr = false; go_deeper_stmt = false }
   in
   let env = Matching_generic.environment_of_any lang config any in
   visitor#visit_any env any

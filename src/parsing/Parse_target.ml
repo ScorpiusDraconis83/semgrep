@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2019-2023 r2c
+ * Copyright (C) 2019-2023 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -12,16 +12,13 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
  * LICENSE for more details.
  *)
-
-open Common
 open Fpath_.Operators
 open Pfff_or_tree_sitter
-open Parsing_result2
+module Res = Parsing_result2
 module Flag = Flag_semgrep
 module E = Core_error
 module OutJ = Semgrep_output_v1_t
-
-let logger = Logging.get_logger [ __MODULE__ ]
+module Log = Log_parsing.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -44,7 +41,7 @@ let errors_from_skipped_tokens xs =
   | [] -> Core_error.ErrorSet.empty
   | x :: _ ->
       let e = exn_of_loc x in
-      let err = E.exn_to_error None x.Tok.pos.file e in
+      let err = E.exn_to_error ~file:x.Loc.pos.file e in
       let locs =
         xs |> List_.map Semgrep_output_utils.location_of_token_location
       in
@@ -58,7 +55,7 @@ let undefined_just_parse_with_lang _lang _file =
  *)
 let just_parse_with_lang_ref = ref undefined_just_parse_with_lang
 
-let just_parse_with_lang lang file =
+let just_parse_with_lang (lang : Lang.t) (file : Fpath.t) : Res.t =
   match lang with
   (* TODO: ideally this should also be in Parse_target2.ml, but we
    * still have a few dependencies to the Js parser because of
@@ -79,54 +76,76 @@ let just_parse_with_lang lang file =
     ->
       (* skip tree-sitter for parsing JS if just_parse_with_lang hasn't been initialized yet *)
       run file [ Pfff (throw_tokens Parse_js.parse) ] Js_to_generic.program
-  | _else_ -> !just_parse_with_lang_ref lang file
+  | _ -> !just_parse_with_lang_ref lang file
 [@@profiling]
 
 (*****************************************************************************)
 (* Entry point *)
 (*****************************************************************************)
 
-let parse_and_resolve_name lang file =
-  let res = just_parse_with_lang lang file in
-  let ast = res.ast in
+let run_analyses_after_name_resolution lang ast =
+  Typing.check_program lang ast;
+
+  Implicit_return.mark_implicit_return lang ast;
+
+  (* Flow-insensitive constant propagation. *)
+  Constant_propagation.propagate_basic lang ast;
+
+  (* Flow-sensitive constant propagation. *)
+  Constant_propagation.propagate_dataflow lang ast
+
+let just_resolve_name lang ast =
   (* to be deterministic, reset the gensym; anyway right now semgrep is
    * used only for local per-file analysis, so no need to have a unique ID
    * among a set of files in a project like codegraph.
    *)
   AST_generic.SId.unsafe_reset_counter ();
   Naming_AST.resolve lang ast;
-  Typing.check_program lang ast;
+  run_analyses_after_name_resolution lang ast
 
-  (* Flow-insensitive constant propagation. *)
-  Constant_propagation.propagate_basic lang ast;
-
-  (* Flow-sensitive constant propagation. *)
-  Constant_propagation.propagate_dataflow lang ast;
-
-  logger#info "Parse_target.parse_and_resolve_name done";
+let parse_and_resolve_name lang file =
+  let res = just_parse_with_lang lang file in
+  let ast = res.ast in
+  just_resolve_name lang ast;
+  Log.info (fun m -> m "Parse_target.parse_and_resolve_name done");
   res
 [@@profiling]
 
 (* used in test files *)
 let parse_and_resolve_name_warn_if_partial lang file =
-  let { ast; skipped_tokens; _ } = parse_and_resolve_name lang file in
-  if skipped_tokens <> [] (* nosemgrep *) then
-    UCommon.pr2 (spf "WARNING: fail to fully parse %s" file);
+  let { ast; errors; _ } : Res.t = parse_and_resolve_name lang file in
+  (match errors with
+  | [] -> ()
+  | _ ->
+      (* nosemgrep: no-logs-in-library *)
+      Logs.warn (fun m -> m "fail to fully parse %s" !!file));
   ast
 
+let fail_on_errors errors =
+  match errors with
+  | [] -> ()
+  | errors ->
+      let error_strs =
+        List_.map (fun (Tree_sitter_error err : Res.error) -> err.msg) errors
+      in
+      failwith (String.concat "\n" error_strs)
+
 let parse_and_resolve_name_fail_if_partial lang file =
-  let { ast; skipped_tokens; _ } = parse_and_resolve_name lang file in
-  if skipped_tokens <> [] then
-    failwith
-      (spf "fail to fully parse %s\n missing tokens:\n%s" file
-         (String.concat "\n" (List_.map Tok.show_location skipped_tokens)));
+  let { ast; errors; _ } : Res.t = parse_and_resolve_name lang file in
+  fail_on_errors errors;
+  ast
+
+let parse_and_resolve_name_strict lang file =
+  let { ast; errors; tolerated_errors; _ } : Res.t =
+    parse_and_resolve_name lang file
+  in
+  fail_on_errors (errors @ tolerated_errors);
   ast
 
 (*****************************************************************************)
 (* For testing purpose *)
 (*****************************************************************************)
 let parse_program file =
-  let file = Fpath.v file in
   let lang = Lang.lang_of_filename_exn file in
-  let res = just_parse_with_lang lang !!file in
+  let res = just_parse_with_lang lang file in
   res.ast

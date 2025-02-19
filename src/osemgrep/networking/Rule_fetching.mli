@@ -1,6 +1,16 @@
+(* Fetching rules from the local filesystem or from the network (registry) *)
+
+(* capabilities required to fetch rules from a Rules_source.t
+ *  - network: for registry rules
+ *  - tmp: for saving the downloaded rules somewhere so we can
+ *    loading them from disk (alt: parse rules from a buffer instead of a file)
+ *  - readdir: for config_string denotating local directories
+ *)
+type caps = < Cap.network ; Cap.tmp ; Cap.readdir >
+
 type rules_and_origin = {
-  rules : Rule.rules;
-  errors : Rule.invalid_rule_error list;
+  rules : Rule.rule list;
+  invalid_rules : Rule_error.invalid_rule list;
   origin : origin;
 }
 
@@ -40,43 +50,49 @@ and origin =
   | Untrusted_remote of Uri.t
 [@@deriving show]
 
-val partition_rules_and_errors :
-  rules_and_origin list -> Rule.rules * Rule.invalid_rule_error list
+val partition_rules_and_invalid :
+  rules_and_origin list -> Rule_error.rules_and_invalid
 
-val rules_from_pattern :
-  string * Xlang.t option * string option -> rules_and_origin list
+val langs_of_pattern : string * Analyzer.t option -> Analyzer.t list
 
 (* [rules_from_rules_source] returns rules from --config or -e.
  * If [rewrite_rule_ids] is true, it will add the path of the config
  * file to the start of rule_ids.
  * The token is used to fetch App rules (e.g., from --config policy).
+ *
+ * It also returns "unrecoverable errors", in the form of `Rule.Error.t`,
+ * which are errors that should prevent further execution, and not be skipped.
+ *
+ * The <Cap.tmp> is because we can fetch rules from the registry but
+ * Parse_rule.ml requires a (temporary) file to parse.
+ *
+ * Note that this also handles the experiment rules in jsonnet!
  *)
 val rules_from_rules_source :
   token_opt:Auth.token option ->
   rewrite_rule_ids:bool ->
-  registry_caching:bool ->
-  < Cap.network > ->
+  strict:bool ->
+  < caps ; .. > ->
   Rules_source.t ->
-  rules_and_origin list
+  rules_and_origin list * Rule_error.t list
 
 (* TODO: make cap network an option (with token) *)
 val rules_from_rules_source_async :
   token_opt:Auth.token option ->
   rewrite_rule_ids:bool ->
-  registry_caching:bool ->
-  < Cap.network > ->
+  strict:bool ->
+  < caps ; .. > ->
   Rules_source.t ->
-  rules_and_origin list Lwt.t
+  (rules_and_origin list * Rule_error.t list) Lwt.t
 
 (* internals *)
 
 val rules_from_dashdash_config_async :
   rewrite_rule_ids:bool ->
   token_opt:Auth.token option ->
-  registry_caching:bool ->
-  < Cap.network > ->
+  < caps ; .. > ->
   Rules_config.t ->
-  rules_and_origin list Lwt.t
+  (rules_and_origin list * Rule_error.t list) Lwt.t
 
 (* [rules_from_dashdash_config] returns a list of rules_and_origin
  * because the [Rules_config.t] can be a [Dir], in which case we return one
@@ -85,24 +101,27 @@ val rules_from_dashdash_config_async :
 val rules_from_dashdash_config :
   rewrite_rule_ids:bool ->
   token_opt:Auth.token option ->
-  registry_caching:bool ->
-  < Cap.network > ->
+  < caps ; .. > ->
   Rules_config.t ->
-  rules_and_origin list
+  rules_and_origin list * Rule_error.t list
 
-(* low-level API *)
+(* low-level API
+ * we still need Cap.network and Cap.tmp because we could load a jsonnet file
+ * that internally imports rules from the registry.
+ * If you just want to load very a simple Yaml or JSON file,
+ * use Parse_rule.parse directly.
+ *)
 val load_rules_from_file :
   rewrite_rule_ids:bool ->
   origin:origin ->
-  registry_caching:bool ->
-  < Cap.network > ->
+  < Cap.network ; Cap.tmp ; .. > ->
   Fpath.t ->
-  rules_and_origin
+  (rules_and_origin, Rule_error.t) Result.t
 
 val load_rules_from_url :
   origin:origin ->
-  ?token_opt:Auth.token option ->
+  ?token_opt:Auth.token ->
   ?ext:string ->
-  < Cap.network > ->
+  < Cap.network ; Cap.tmp ; .. > ->
   Uri.t ->
-  rules_and_origin
+  (rules_and_origin, Rule_error.t) Result.t

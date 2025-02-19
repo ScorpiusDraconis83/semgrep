@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2021-2022 r2c
+ * Copyright (C) 2021-2022 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -18,8 +18,7 @@ module XP = Xpattern
 module MV = Metavariable
 module SP = Semgrep_prefilter_t
 module MvarSet = Common2.StringSet
-
-let logger = Logging.get_logger [ __MODULE__ ]
+module Log = Log_optimizing.Log
 
 [@@@warning "-32"] (* for the unused pp_ coming from deriving show *)
 
@@ -93,12 +92,12 @@ exception CNF_exploded
 (* Helpers *)
 (*****************************************************************************)
 
-(* NOTE "AND vs OR and map_filter":
- * We cannot use `Common.map_filter` for `R.Or`, because it has the wrong
+(* NOTE "AND vs OR and filter_map":
+ * We cannot use `List_.filter_map` for `R.Or`, because it has the wrong
  * semantics. We use `None` to say "we can't handle this", or in other words,
  * "we assume this pattern can match", or just "true"! So in an AND we can
  * remove those "true" terms, but in an OR we need to reduce the entire OR to
- * "true". Therefore, `Common.map_filter` works for AND-semantics, but for
+ * "true". Therefore, `List_.filter_map` works for AND-semantics, but for
  * OR-semantics we need `option_map`. *)
 let option_map f xs =
   List.fold_left
@@ -128,23 +127,24 @@ let option_map f xs =
 
 (* less: move the Not to leaves, applying DeMorgan, and then filter them? *)
 let rec (remove_not : Rule.formula -> Rule.formula option) =
- fun f ->
+ fun ({ f; conditions; focus; fix = _; as_ } as formula) ->
+  let reconstruct f = R.mk_formula ~conditions ~focus ?as_ f in
   match f with
-  | R.And (t, { conjuncts = xs; conditions = conds; focus }) ->
-      let ys = List_.map_filter remove_not xs in
+  | R.And (t, xs) ->
+      let ys = List_.filter_map remove_not xs in
       if List_.null ys then (
-        logger#warning "null And after remove_not";
+        Log.debug (fun m -> m "null And after remove_not");
         None)
-      else Some (R.And (t, { conjuncts = ys; conditions = conds; focus }))
+      else Some (R.And (t, ys) |> reconstruct)
   | R.Or (t, xs) ->
-      (* See NOTE "AND vs OR and map_filter". *)
+      (* See NOTE "AND vs OR and filter_map". *)
       let* ys = option_map remove_not xs in
       if List_.null ys then (
-        logger#warning "null Or after remove_not";
+        Log.debug (fun m -> m "null Or after remove_not");
         None)
-      else Some (R.Or (t, ys))
-  | R.Not (_, f) -> (
-      match f with
+      else Some (R.Or (t, ys) |> reconstruct)
+  | R.Not (_, formula) -> (
+      match formula.f with
       | R.P _ -> None
       (* double negation *)
       | R.Not (_, f) -> remove_not f
@@ -154,28 +154,28 @@ let rec (remove_not : Rule.formula -> Rule.formula option) =
          failwith "Not Or" was just translated to below case, etc..
       *)
       | R.Or (_, _xs) ->
-          logger#warning "Not Or";
+          Log.debug (fun m -> m "Not Or");
           None
       | R.And _ ->
-          logger#warning "Not And";
+          Log.debug (fun m -> m "Not And");
           None
       | R.Inside _ ->
-          logger#warning "Not Inside";
+          Log.debug (fun m -> m "Not Inside");
           None
       | R.Anywhere _ ->
-          logger#warning "Not Anywhere";
+          Log.debug (fun m -> m "Not Anywhere");
           None)
   | R.Inside (t, formula) ->
       let* formula = remove_not formula in
-      Some (R.Inside (t, formula))
+      Some (R.Inside (t, formula) |> reconstruct)
   | R.Anywhere (t, formula) ->
       let* formula = remove_not formula in
-      Some (R.Anywhere (t, formula))
-  | R.P pat -> Some (P pat)
+      Some (R.Anywhere (t, formula) |> reconstruct)
+  | R.P _ -> Some formula
 
 let remove_not_final f =
   let final_opt = remove_not f in
-  if Option.is_none final_opt then logger#error "no formula";
+  if Option.is_none final_opt then Log.err (fun m -> m "no formula");
   final_opt
 
 type step0 = LPat of Xpattern.t | LCond of Rule.metavar_cond
@@ -187,66 +187,80 @@ type cnf_step0 = step0 cnf [@@deriving show]
 (* reference? https://www.cs.jhu.edu/~jason/tutorials/convert-to-CNF.html
  * TODO the current code triggers some Stack_overflow on
  * tests/rules/tainted-filename.yaml. I've replaced some List.map
- * by Common.map, but we still get some Stack_overflow because of the many
+ * by List_.map, but we still get some Stack_overflow because of the many
  * calls to @.
  *)
-let rec (cnf : Rule.formula -> cnf_step0) =
- fun f ->
-  match f with
-  | R.P pat -> And [ Or [ LPat pat ] ]
-  | R.Not (_, _f) ->
-      (* should be filtered by remove_not *)
-      failwith "call remove_not before cnf"
-  (* old:
-   * (match f with
-   * | R.Leaf x -> And [Or [Not x]]
-   * (* double negation *)
-   * | R.Not f -> cnf f
-   * (* de Morgan's laws *)
-   * | R.Or _xs -> failwith "Not Or"
-   * | R.And _xs -> failwith "Not And"
-   * )
-   *)
-  | R.Inside (_, formula)
-  | R.Anywhere (_, formula) ->
-      cnf formula
-  | R.And (_, { conjuncts = xs; conditions = conds; _ }) ->
-      let ys = List_.map cnf xs in
-      let zs = List_.map (fun (_t, cond) -> And [ Or [ LCond cond ] ]) conds in
-      And (ys @ zs |> List.concat_map (function And ors -> ors))
-  | R.Or (_, xs) ->
-      let is_dangerously_large p q =
-        List.compare_length_with p 10_000 > 0
-        || List.compare_length_with q 10_000 > 0
-        ||
-        let p_len = List.length p in
-        let q_len = List.length q in
-        (* Divide rather than multiply to avoid integer overflow *)
-        p_len > Int.div 50_000 q_len
+let (cnf : Rule.formula -> cnf_step0) =
+ fun formula ->
+  let rec aux { Rule.f; conditions; _ } =
+    let augment_with_conditions (And x) =
+      let conditions =
+        List_.map (fun (_t, cond) -> Or [ LCond cond ]) conditions
       in
-      let ys = List_.map cnf xs in
-      List.fold_left
-        (fun (And ps) (And qs) ->
-          (* Abort before this starts consuming insane amounts of memory. *)
-          if is_dangerously_large ps qs then raise CNF_exploded;
-          (* Distributive law *)
-          And
-            (ps
-            |> List.concat_map (fun pi ->
-                   let ands =
-                     qs
-                     |> List_.map (fun qi ->
-                            let (Or pi_ors) = pi in
-                            let (Or qi_ors) = qi in
-                            (* `ps` is the accumulator so we expect it to be larger *)
-                            let ors = List.rev_append qi_ors pi_ors in
-                            Or ors)
-                   in
-                   ands)))
-        (* If `ys = []`, we have `Or []` which is the same as `false`. Note that
-         * the CNF is then `And [Or []]` rather than `And []` (the latter being
-         * the same `true`). *)
-        (And [ Or [] ]) ys
+      And (x @ conditions)
+    in
+    aux' f |> augment_with_conditions
+  and aux' kind =
+    match kind with
+    | R.P pat -> And [ Or [ LPat pat ] ]
+    | R.Not (_, _f) ->
+        (* should be filtered by remove_not *)
+        failwith "call remove_not before cnf"
+    (* old:
+       * (match f with
+       * | R.Leaf x -> And [Or [Not x]]
+       * (* double negation *)
+       * | R.Not f -> cnf f
+       * (* de Morgan's laws *)
+       * | R.Or _xs -> failwith "Not Or"
+       * | R.And _xs -> failwith "Not And"
+       * )
+    *)
+    | R.Inside (_, formula)
+    | R.Anywhere (_, formula) ->
+        aux formula
+    | R.And (_, xs) ->
+        let ys = List_.map aux xs in
+        And
+          (List.concat_map
+             (function
+               | And x -> x)
+             ys)
+    | R.Or (_, xs) ->
+        let is_dangerously_large p q =
+          List.compare_length_with p 10_000 > 0
+          || List.compare_length_with q 10_000 > 0
+          ||
+          let p_len = List.length p in
+          let q_len = List.length q in
+          (* Divide rather than multiply to avoid integer overflow *)
+          p_len > Int.div 50_000 q_len
+        in
+        let ys = List_.map aux xs in
+        List.fold_left
+          (fun (And ps) (And qs) ->
+            (* Abort before this starts consuming insane amounts of memory. *)
+            if is_dangerously_large ps qs then raise CNF_exploded;
+            (* Distributive law *)
+            And
+              (ps
+              |> List.concat_map (fun pi ->
+                     let ands =
+                       qs
+                       |> List_.map (fun qi ->
+                              let (Or pi_ors) = pi in
+                              let (Or qi_ors) = qi in
+                              (* `ps` is the accumulator so we expect it to be larger *)
+                              let ors = List.rev_append qi_ors pi_ors in
+                              Or ors)
+                     in
+                     ands)))
+          (* If `ys = []`, we have `Or []` which is the same as `false`. Note that
+             * the CNF is then `And [Or []]` rather than `And []` (the latter being
+             * the same `true`). *)
+          (And [ Or [] ]) ys
+  in
+  aux formula
 
 (*****************************************************************************)
 (* Step1: just collect strings, mvars, regexps *)
@@ -268,9 +282,9 @@ type is_id_mvar = Metavariable.mvar -> bool
 let id_mvars_of_formula f =
   let id_mvars = ref MvarSet.empty in
   f
-  |> R.visit_new_formula (fun xp ~inside:_ ->
+  |> Visit_rule.visit_xpatterns (fun xp ~inside:_ ->
          match xp with
-         | { pat = XP.Sem ((lazy pat), lang); _ } ->
+         | { pat = XP.Sem (pat, lang); _ } ->
              id_mvars :=
                Analyze_pattern.extract_mvars_in_id_position ~lang pat
                |> MvarSet.union !id_mvars
@@ -282,16 +296,16 @@ let id_mvars_of_formula f =
 (*
 let rec (and_step1: Rule.formula -> cnf_step1) = fun f ->
   match f with
-  | R.And xs -> And (xs |> Common.map_filter or_step1)
-  | _ -> And ([f] |> Common.map_filter or_step1)
+  | R.And xs -> And (xs |> List_.filter_map or_step1)
+  | _ -> And ([f] |> List_.filter_map or_step1)
 and or_step1 f =
   match f with
   | R.Or xs ->
-      let ys = (xs |> Common.map_filter leaf_step1) in
+      let ys = (xs |> List_.filter_map leaf_step1) in
       if null ys
       then None
       else (Some (Or ys))
-  | _ -> let ys = ([f] |> Common.map_filter leaf_step1) in
+  | _ -> let ys = ([f] |> List_.filter_map leaf_step1) in
       if null ys
       then None
       else (Some (Or ys))
@@ -309,13 +323,13 @@ and leaf_step1 f =
 let rec (and_step1 : is_id_mvar:is_id_mvar -> cnf_step0 -> cnf_step1) =
  fun ~is_id_mvar cnf ->
   match cnf with
-  | And xs -> And (xs |> List_.map_filter (or_step1 ~is_id_mvar))
+  | And xs -> And (xs |> List_.filter_map (or_step1 ~is_id_mvar))
 
 and or_step1 ~is_id_mvar cnf =
   match cnf with
   | Or xs ->
-      (* old: We had `Common.map_filter` here before, but that gives the wrong
-       * semantics. See NOTE "AND vs OR and map_filter". *)
+      (* old: We had `List_.filter_map` here before, but that gives the wrong
+       * semantics. See NOTE "AND vs OR and filter_map". *)
       let* ys = option_map (leaf_step1 ~is_id_mvar) xs in
       if List_.null ys then None else Some (Or ys)
 
@@ -328,7 +342,7 @@ and leaf_step1 ~is_id_mvar f =
 
 and xpat_step1 pat =
   match pat.XP.pat with
-  | XP.Sem ((lazy pat), lang) ->
+  | XP.Sem (pat, lang) ->
       let ids, mvars = Analyze_pattern.extract_strings_and_mvars ~lang pat in
       Some (StringsAndMvars (ids, mvars))
   (* less: could also extract ids and mvars, but maybe no need to
@@ -347,6 +361,7 @@ and metavarcond_step1 ~is_id_mvar x =
       if is_id_mvar mvar then Some (MvarRegexp (mvar, re, const_prop)) else None
   (* TODO? maybe we should extract the strings from the type constraint *)
   | R.CondType _ -> None
+  | R.CondName _ -> None
   | R.CondAnalysis _ -> None
 
 (*****************************************************************************)
@@ -361,7 +376,7 @@ and metavarcond_step1 ~is_id_mvar x =
 let and_step1bis_filter_general (And xs) =
   let has_empty_idents, rest =
     xs
-    |> Either_.partition_either (function Or xs ->
+    |> Either_.partition (function Or xs ->
            if
              xs
              |> List.exists (function
@@ -373,7 +388,7 @@ let and_step1bis_filter_general (And xs) =
   (* TODO: regression on vertx-sqli.yaml   *)
   let filtered =
     has_empty_idents
-    |> List_.map_filter (fun (Or xs) ->
+    |> List_.filter_map (fun (Or xs) ->
            let xs' =
              xs
              |> List_.exclude (function
@@ -409,14 +424,14 @@ let or_step2 (Or xs) =
     List_.map (function
       | StringsAndMvars ([], _) -> raise GeneralPattern
       | StringsAndMvars (xs, _) -> Idents xs
-      | Regexp re_str -> Regexp2_search (Regexp_engine.pcre_compile re_str)
+      | Regexp re_str -> Regexp2_search (Pcre2_.pcre_compile re_str)
       | MvarRegexp (_mvar, re_str, _const_prop) ->
           (* The original regexp is meant to apply on a substring.
               We rewrite them to remove end-of-string anchors if possible. *)
           let re =
             match
-              Regexp_engine.remove_end_of_string_assertions
-                (Regexp_engine.pcre_compile re_str)
+              Pcre2_.remove_end_of_string_assertions
+                (Pcre2_.pcre_compile re_str)
             with
             | None -> raise GeneralPattern
             | Some re -> re
@@ -430,7 +445,7 @@ let or_step2 (Or xs) =
   | GeneralPattern -> None
 
 let and_step2 (And xs) =
-  let ys = xs |> List_.map_filter or_step2 in
+  let ys = xs |> List_.filter_map or_step2 in
   if List_.null ys then raise GeneralPattern;
   And ys
 
@@ -443,7 +458,7 @@ let prefilter_formula_of_cnf_step2 (And xs) : Semgrep_prefilter_t.formula =
              |> List_.map (function
                   | Idents xs -> `Pred (`Idents xs)
                   | Regexp2_search re ->
-                      let re_str = Regexp_engine.show re in
+                      let re_str = Pcre2_.show re in
                       `Pred (`Regexp re_str))
            in
            match ys' with
@@ -473,7 +488,7 @@ type cnf_final = AndFinal of final_step list
 [@@deriving show]
 
 let or_final (Or xs) =
-  let ys = xs |> Common.map (function
+  let ys = xs |> List_.map (function
    | Idents [] -> raise Impossible
    (* take the first one *)
    | Idents (x::_) -> Re.matching_exact_string x
@@ -496,7 +511,7 @@ let or_final (Or xs) =
  * up the Idents in an AndFinal
  *)
 let and_final (And disjs) =
-  AndFinal (disjs |> Common.map_filter or_final)
+  AndFinal (disjs |> List_.filter_map or_final)
 
 (* todo: instead of running multiple times for the AndFinal, we could
  * do an or, look at the matched string and detect which parts of the
@@ -529,10 +544,11 @@ let eval_and p (And xs) =
             ignore it *)
          (try
             if not v then
-              logger#trace "this Or failed: %s" (Dumper.dump (Or xs))
+              Log.debug (fun m -> m "this Or failed: %s" (Dumper.dump (Or xs)))
           with
          | e ->
-             logger#trace "exception while dumping: %s" (Printexc.to_string e));
+             Log.err (fun m ->
+                 m "exception while dumping: %s" (Printexc.to_string e)));
          v)
 
 let run_cnf_step2 cnf big_str =
@@ -541,14 +557,15 @@ let run_cnf_step2 cnf big_str =
        | Idents xs ->
            xs
            |> List.for_all (fun id ->
-                  logger#debug "check for the presence of %S" id;
+                  Log.debug (fun m -> m "check for the presence of %S" id);
                   (* TODO: matching_exact_word does not work, why??
-                     because string literals and metavariables are put under Idents? *)
-                  let re = Regexp_engine.matching_exact_string id in
-                  (* Note that in case of a PCRE error, we want to assume that the
-                     rule is relevant, hence ~on_error:true! *)
-                  Regexp_engine.unanchored_match ~on_error:true re big_str)
-       | Regexp2_search re -> Regexp_engine.unanchored_match re big_str)
+                     because string literals and metavariables are put under
+                     Idents? *)
+                  let re = Pcre2_.matching_exact_string id in
+                  (* Note that in case of a PCRE error, we want to assume
+                     that the rule is relevant, hence ~on_error:true! *)
+                  Pcre2_.unanchored_match ~on_error:true re big_str)
+       | Regexp2_search re -> Pcre2_.unanchored_match re big_str)
 [@@profiling]
 
 (*****************************************************************************)
@@ -571,22 +588,22 @@ let prefilter_formula_of_prefilter (pre : prefilter) :
 let compute_final_cnf ~(is_id_mvar : is_id_mvar) f =
   let* f = remove_not_final f in
   let cnf = cnf f in
-  logger#ldebug (lazy (spf "cnf0 = %s" (show_cnf_step0 cnf)));
+  Log.debug (fun m -> m "cnf0 = %s" (show_cnf_step0 cnf));
   (* let cnf = and_step1 f in *)
   let cnf : cnf_step1 = and_step1 ~is_id_mvar cnf in
-  logger#ldebug (lazy (spf "cnf1 = %s" (show_cnf_step1 cnf)));
+  Log.debug (fun m -> m "cnf1 = %s" (show_cnf_step1 cnf));
   (* TODO: regression on vertx-sqli.yaml
      let cnf = and_step1bis_filter_general cnf in
      logger#ldebug (lazy (spf "cnf1bis = %s" (show_cnf_step1 cnf)));
   *)
   let cnf = and_step2 cnf in
-  logger#ldebug (lazy (spf "cnf2 = %s" (show_cnf_step2 cnf)));
+  Log.debug (fun m -> m "cnf2 = %s" (show_cnf_step2 cnf));
   Some cnf
 [@@profiling]
 
-let regexp_prefilter_of_formula ~xlang f : prefilter option =
+let regexp_prefilter_of_formula ~analyzer f : prefilter option =
   let is_id_mvar =
-    match (xlang : Xlang.t) with
+    match (analyzer : Analyzer.t) with
     | LRegex
     | LSpacegrep
     | LAliengrep ->
@@ -611,7 +628,7 @@ let regexp_prefilter_of_formula ~xlang f : prefilter option =
   with
   | GeneralPattern -> None
 
-let regexp_prefilter_of_taint_rule ~xlang (_rule_id, rule_tok) taint_spec =
+let regexp_prefilter_of_taint_rule ~analyzer (_rule_id, rule_tok) taint_spec =
   (* We must be able to match some source _and_ some sink. *)
   let sources =
     taint_spec.R.sources |> snd
@@ -627,13 +644,10 @@ let regexp_prefilter_of_taint_rule ~xlang (_rule_id, rule_tok) taint_spec =
      * analysis! *)
     R.And
       ( rule_tok,
-        {
-          conjuncts = [ R.Or (rule_tok, sources); R.Or (rule_tok, sinks) ];
-          conditions = [];
-          focus = [];
-        } )
+        [ R.f (R.Or (rule_tok, sources)); R.f (R.Or (rule_tok, sinks)) ] )
+    |> R.f
   in
-  regexp_prefilter_of_formula ~xlang f
+  regexp_prefilter_of_formula ~analyzer f
 
 let regexp_prefilter_of_rule ~cache (r : R.rule) =
   let rule_id, _t = r.R.id in
@@ -649,21 +663,21 @@ let regexp_prefilter_of_rule ~cache (r : R.rule) =
       match r.mode with
       | `Search f
       | `Extract { formula = f; _ } ->
-          regexp_prefilter_of_formula ~xlang:r.target_analyzer f
+          regexp_prefilter_of_formula ~analyzer:r.target_analyzer f
       | `Taint spec ->
-          regexp_prefilter_of_taint_rule ~xlang:r.target_analyzer r.R.id spec
-      | `Secrets _ (* TODO *)
-      | `Steps _ ->
-          (* TODO *) None
+          regexp_prefilter_of_taint_rule ~analyzer:r.target_analyzer r.R.id spec
+      | `Steps _ -> (* TODO *) None
+      | `SCA _ -> None
     with
     (* TODO: see tests/rules/tainted-filename.yaml,
                  tests/rules/kotlin_slow_import.yaml *)
     | CNF_exploded ->
-        logger#error "CNF size exploded on rule id %s"
-          (Rule_ID.to_string rule_id);
+        Log.warn (fun m ->
+            m "CNF size exploded on rule id %s" (Rule_ID.to_string rule_id));
         None
     | Stack_overflow ->
-        logger#error "Stack overflow on rule id %s" (Rule_ID.to_string rule_id);
+        Log.err (fun m ->
+            m "Stack overflow on rule id %s" (Rule_ID.to_string rule_id));
         None
   in
   match cache with

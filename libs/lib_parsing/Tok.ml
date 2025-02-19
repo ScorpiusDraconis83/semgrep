@@ -53,18 +53,7 @@ open Sexplib.Std
 (* To report errors, regular position information.
  * Note that Loc.t is now an alias for Tok.location.
  *)
-type location = {
-  (* the content of the "token" *)
-  str : string;
-  (* TODO? the content of Pos.t used to be inlined in this location type.
-   * It is cleaner to factorize things in Pos.t, but this introduces
-   * an extra pointer which actually can have real performance implication
-   * in Semgrep on huge monorepos. It might be worth inlining it back
-   * (and also reduce its number of fields).
-   *)
-  pos : Pos.t;
-}
-[@@deriving show { with_path = false }, eq, ord, sexp]
+type location = Loc.t [@@deriving show { with_path = false }, eq, ord, sexp]
 
 (* to represent fake (e.g., fake semicolons in languages such as Javascript),
  * and expanded tokens (e.g., preprocessed constructs by cpp for C/C++)
@@ -122,7 +111,7 @@ type t =
 and virtual_location = location * int
 [@@deriving show { with_path = false }, eq, ord, sexp]
 
-type t_always_equal = t [@@deriving show, sexp]
+type t_always_equal = t [@@deriving show, ord, sexp]
 
 (* sgrep: we do not care about position when comparing for equality 2 ASTs.
  * related: Lib_AST.abstract_position_info_any and then use OCaml generic '='.
@@ -163,8 +152,6 @@ let is_origintok ii =
   match ii with
   | OriginTok _ -> true
   | _ -> false
-
-let fake_location = { str = ""; pos = Pos.fake_pos }
 
 (* Synthesize a fake token *)
 let unsafe_fake_tok str : t = FakeTok (str, None)
@@ -242,52 +229,34 @@ let content_of_tok_opt ii =
   | Ab ->
       None
 
-(* Token locations are supposed to denote the beginning of a token.
-   Suppose we are interested in instead having line, column, and bytepos of
-   the end of a token instead.
-   This is something we can do at relatively low cost by going through and
-   inspecting the contents of the token, plus the start information.
-*)
-let end_pos_of_loc loc =
-  let line, col, trailing_nl =
-    String.fold_left
-      (fun (line, col, after_nl) c ->
-        match c with
-        | '\n' when after_nl -> (line + 1, 0, true)
-        | '\n' -> (line, col, true)
-        | _ when after_nl -> (line + 1, 1, false)
-        | _ -> (line, col + 1, false))
-      (loc.pos.line, loc.pos.column, false)
-      loc.str
-  in
-  let col =
-    (* THINK: We count a trailing newline as an extra character in the last line,
-     * is that the standard ? *)
-    if trailing_nl then col + 1 else col
-  in
-  (line, col, loc.pos.bytepos + String.length loc.str)
-
 (*****************************************************************************)
 (* Builders *)
 (*****************************************************************************)
 
 let tok_of_loc loc = OriginTok loc
 
-let tok_of_str_and_bytepos str pos =
-  let loc =
+let make ~str ~file ~bytepos =
+  let loc : Loc.t =
     {
       str;
       (* the pos will be filled in post-lexing phase, see complete_location *)
-      pos = Pos.make pos;
+      pos = Pos.make file bytepos;
     }
   in
   tok_of_loc loc
 
+(* TODO: we can't rely on Lexing.lexbuf.pos_fname to have
+ * been set correctly by the caller (or need an "origin" when lexbuf is stdin)
+ * and actually in many case where we do a Lexbuf.of_string, the
+ * pos_fname is the empty string
+ *)
 let tok_of_lexbuf lexbuf =
-  tok_of_str_and_bytepos (Lexing.lexeme lexbuf) (Lexing.lexeme_start lexbuf)
+  let fname = lexbuf.Lexing.lex_curr_p.pos_fname in
+  (* see Lexing.zero_pos *)
+  let file = if fname = "" then Fpath_.fake_file else Fpath.v fname in
+  make ~str:(Lexing.lexeme lexbuf) ~file ~bytepos:(Lexing.lexeme_start lexbuf)
 
-let first_loc_of_file file = { str = ""; pos = Pos.first_pos_of_file file }
-let first_tok_of_file file = fake_tok_loc (first_loc_of_file file) ""
+let first_tok_of_file file = fake_tok_loc (Loc.first_loc_of_file file) ""
 
 let rewrap_str s ii =
   match ii with
@@ -310,14 +279,152 @@ let str_of_info_fake_ok ii =
   | Ab -> raise (NoTokenLocation "Ab")
 
 let combine_toks x xs =
-  let str = xs |> List.map str_of_info_fake_ok |> String.concat "" in
+  let str = xs |> List_.map str_of_info_fake_ok |> String.concat "" in
   tok_add_s str x
+
+let count_char c str =
+  String.fold_left
+    (fun sum c2 -> if Char.equal c c2 then sum + 1 else sum)
+    0 str
+
+(*
+   Track the current offset in the line (column, 0-based).
+   This function looks for newlines in a string to be added to a buffer
+   and updates the current column accordingly.
+*)
+let update_column current_column str =
+  match String.rindex_opt str '\n' with
+  | None -> current_column := !current_column + String.length str
+  | Some newline_pos ->
+      let column = String.length str - (newline_pos + 1) in
+      assert (column >= 0);
+      current_column := column
+
+(*
+   Goal: see mli.
+
+   Constraints:
+   - preserve the byte offset between the start of tokens.
+   - preserve the newline offset between the start of tokens.
+
+   Weird things to keep in mind:
+   - there's no guarantee that the token's original locations are in sequential
+     order and don't overlap.
+   - a token may contain newline characters.
+   - the ignorable newline string to be inserted may be longer than the
+     amount of space available (e.g. the original syntax was using
+     a single newline character LF but we insert BACKSLASH-LF)
+
+   Algorithm: Create a buffer, track byte count and line count.
+   Before adding a token, compare the position of the token start in the
+   source file against the current position given by the number bytes and
+   newlines added to the buffer so far.
+   Add as many newline sequences as needed to fix the line count.
+   Adjust the byte count accordingly. Add as many blanks as needed to
+   fix the byte count.
+
+   Using the Buffer.t type, the byte count is tracked automatically
+   and returned by Buffer.length. The newline count is tracked with a ref.
+*)
+let combine_sparse_toks ?(ignorable_newline = "\n") ?(ignorable_blank = ' ')
+    first_tok toks =
+  if count_char '\n' ignorable_newline <> 1 then
+    invalid_arg
+      "Tok.combine_sparse_toks: ignorable_newline must contain exactly one \
+       newline character";
+  if Char.equal ignorable_blank '\n' then
+    invalid_arg "Tok.combine_sparse_toks: ignorable_blank may not be a newline";
+  let column_after_an_ignorable_newline =
+    match String.rindex_opt ignorable_newline '\n' with
+    | Some newline_pos ->
+        (* 0 if ignorable_newline ends with '\n' as is usually the case *)
+        String.length ignorable_newline - (newline_pos + 1)
+    | None -> assert false
+  in
+  match loc_of_tok first_tok with
+  | Error _ -> None
+  | Ok { pos = orig_pos; _ } ->
+      let current_line = ref orig_pos.line in
+      let current_column = ref orig_pos.column in
+      let buf = Buffer.create 100 in
+      let add_tok tok =
+        match loc_of_tok tok with
+        | Error _ -> ()
+        | Ok { str; pos } ->
+            (*
+           Insert padding before the token string to match the original
+           line number, column, and byte offset.
+
+           Various conditions can make this impossible. Examples include:
+           - The decoded tokens use more space than the source
+             e.g. "(x)" gets decoded into "begin x end" or some character
+             that didn't escaping in the source becomes escaped such
+             as "<" becoming "&lt;", or "&lt;" became "&#60;".
+           - The newline we insert as the string 'ignorable_newline'
+             can be longer than the original newline e.g. the original
+             was a single newline character but out of precaution,
+             'ignorable_newline' is a line continuation "\\\n" (2 bytes).
+             So, parsing "a\nb" into two tokens ["a"; "b"] result in
+             the string "a\\\nb" which has the correct number of newlines
+             and presumably has correct syntax but shifts "b" by one byte.
+
+           Priority is given to getting (line, column) right over the byte
+           offset.
+
+           Important: the line number and column number must not exceed
+           the original values, otherwise it's possible they can't be
+           found in the source file when converting a (line, col) position
+           into a bytepos by consulting the original file.
+        *)
+            let missing_newlines = max 0 (pos.line - !current_line) in
+            let missing_newline_bytes =
+              missing_newlines * String.length ignorable_newline
+            in
+            let column_after_adding_missing_newlines =
+              if missing_newlines > 0 then column_after_an_ignorable_newline
+              else !current_column
+            in
+            let missing_indent =
+              max 0 (pos.column - column_after_adding_missing_newlines)
+            in
+            let missing_bytes =
+              max 0
+                (pos.bytepos - orig_pos.bytepos - missing_newline_bytes
+               - missing_indent)
+            in
+            (* It's safe to insert missing bytes only if they're followed
+               by a newline that resets the indentation. *)
+            if missing_newlines > 0 then
+              for (* Adjust bytepos *)
+                  _ = 1 to missing_bytes do
+                Buffer.add_char buf ignorable_blank;
+                incr current_column
+              done;
+            (* Adjust line number *)
+            for _ = 1 to missing_newlines do
+              Buffer.add_string buf ignorable_newline;
+              update_column current_column ignorable_newline
+            done;
+            (* Adjust column number *)
+            for _ = 1 to missing_indent do
+              Buffer.add_char buf ignorable_blank;
+              incr current_column
+            done;
+            (* Add the token string *)
+            Buffer.add_string buf str;
+            update_column current_column str;
+            let newlines_in_tok = count_char '\n' str in
+            current_line := !current_line + missing_newlines + newlines_in_tok
+      in
+      List.iter add_tok (first_tok :: toks);
+      let str = Buffer.contents buf in
+      Some (OriginTok { str; pos = orig_pos })
 
 let empty_tok_after tok : t =
   match loc_of_tok tok with
   | Ok loc ->
       let prev_len = String.length loc.str in
-      let loc =
+      let loc : Loc.t =
         {
           str = "";
           pos =
@@ -343,7 +450,7 @@ let split_tok_at_bytepos pos ii =
   let loc1_str = String.sub str 0 pos in
   let loc2_str = String.sub str pos (String.length str - pos) in
   let loc1 = { loc with str = loc1_str } in
-  let loc2 =
+  let loc2 : Loc.t =
     {
       str = loc2_str;
       pos =
@@ -360,23 +467,6 @@ let split_tok_at_bytepos pos ii =
 (* Adjusting location *)
 (*****************************************************************************)
 
-(* TODO? move to Pos.ml and use Pos.t instead *)
-let adjust_loc_wrt_base base_loc loc =
-  (* Note that bytepos and columns are 0-based, whereas lines are 1-based. *)
-  let base_pos = base_loc.pos in
-  let pos = loc.pos in
-  {
-    loc with
-    pos =
-      {
-        bytepos = base_pos.bytepos + pos.bytepos;
-        line = base_pos.line + pos.line - 1;
-        column =
-          (if pos.line =|= 1 then base_pos.column + pos.column else pos.column);
-        file = base_pos.file;
-      };
-  }
-
 let fix_location fix ii =
   match ii with
   | OriginTok pi -> OriginTok (fix pi)
@@ -385,15 +475,13 @@ let fix_location fix ii =
   | Ab -> Ab
 
 let adjust_tok_wrt_base base_loc ii =
-  fix_location (adjust_loc_wrt_base base_loc) ii
-
-let fix_pos fix loc = { loc with pos = fix loc.pos }
+  fix_location (Loc.adjust_loc_wrt_base base_loc) ii
 
 (*****************************************************************************)
 (* Adjust line x col *)
 (*****************************************************************************)
 
-let complete_location filename table (x : location) =
+let complete_location (filename : Fpath.t) table (x : location) =
   { x with pos = Pos.complete_position filename table x.pos }
 
 (*

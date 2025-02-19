@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2020 r2c
+ * Copyright (C) 2020 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -14,6 +14,7 @@
  *)
 module Flag = Flag_semgrep
 module R = Mini_rule
+module Log = Log_optimizing.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -25,14 +26,12 @@ module R = Mini_rule
  * in Semgrep.ml (instead of on mini-rule level in Semgrep_generic.ml).
  *)
 
-let logger = Logging.get_logger [ __MODULE__ ]
-
 (*****************************************************************************)
 (* Entry point *)
 (*****************************************************************************)
 
 let filter_mini_rules_relevant_to_file_using_regexp rules lang file =
-  let str = UCommon.read_file file in
+  let str = UFile.Legacy.read_file file in
   rules
   |> List.filter (fun rule ->
          let pat = rule.R.pattern in
@@ -53,11 +52,12 @@ let filter_mini_rules_relevant_to_file_using_regexp rules lang file =
             *)
            xs
            |> List.for_all (fun x ->
-                  let re = Regexp_engine.matching_exact_string x in
-                  Regexp_engine.unanchored_match re str)
+                  let re = Pcre2_.matching_exact_string x in
+                  Pcre2_.unanchored_match re str)
          in
 
          if not match_ then
-           logger#info "filtering rule %s" (Rule_ID.to_string rule.id);
+           Log.info (fun m ->
+               m "filtering out rule %s" (Rule_ID.to_string rule.id));
          match_)
 [@@profiling "Mini_rules_filter.filter"]

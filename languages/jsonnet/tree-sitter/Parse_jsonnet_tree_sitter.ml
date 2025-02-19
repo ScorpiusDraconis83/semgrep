@@ -689,11 +689,10 @@ and map_params (env : env) ((v1, v2, v3) : CST.params) : parameter list =
 (* Entry point *)
 (*****************************************************************************)
 
-let parse path =
-  let file = !!path in
+let parse file =
   H.wrap_parser
-    (fun () -> Tree_sitter_jsonnet.Parse.file file)
-    (fun cst ->
+    (fun () -> Tree_sitter_jsonnet.Parse.file !!file)
+    (fun cst _extras ->
       let env = { H.file; conv = H.line_col_to_pos file; extra = () } in
       let e = map_document env cst in
       e)
@@ -701,8 +700,9 @@ let parse path =
 let parse_pattern str =
   H.wrap_parser
     (fun () -> Tree_sitter_jsonnet.Parse.string str)
-    (fun cst ->
-      let file = "<pattern>" in
-      let env = { H.file; conv = Hashtbl.create 0; extra = () } in
+    (fun cst _extras ->
+      (* TODO: use Origin!! *)
+      let file = Fpath.v "<pattern>" in
+      let env = { H.file; conv = H.line_col_to_pos_pattern str; extra = () } in
       let e = map_document env cst in
       E e)

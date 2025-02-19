@@ -16,7 +16,8 @@
 (*****************************************************************************)
 (* Prelude *)
 (*****************************************************************************)
-open Alcotest_ext
+
+let t = Testo.create
 
 (*****************************************************************************)
 (* Code *)
@@ -26,20 +27,20 @@ let real_fetch_tests caps =
   let fetch_ocaml_rules () =
     match
       Rule_fetching.rules_from_dashdash_config ~rewrite_rule_ids:false
-        ~token_opt:None ~registry_caching:false caps
-        (Rules_config.R (Pack "ocaml"))
+        ~token_opt:None caps (Rules_config.R (Pack "ocaml"))
     with
-    | [ { rules; _ } ] ->
+    | [ { rules; _ } ], [] ->
         Alcotest.(check bool) "fetch ocaml rules" true (not @@ List_.null rules)
-    | _ -> Alcotest.fail "fetch ocaml rules; got no rules"
+    | _ -> Alcotest.fail "fetch ocaml rules; got no rules or got rule errors"
   in
-  pack_tests "fetch tests"
+  Testo.categorize "fetch tests"
     [
-      ("fetch ocaml rules 1", fetch_ocaml_rules);
-      ("fetch ocaml rules 2", fetch_ocaml_rules);
-      ("fetch ocaml rules 3", fetch_ocaml_rules);
-      ("fetch ocaml rules 4", fetch_ocaml_rules);
-      ("fetch ocaml rules 5", fetch_ocaml_rules);
+      t "fetch ocaml rules 1" fetch_ocaml_rules;
+      t "fetch ocaml rules 2" fetch_ocaml_rules;
+      t "fetch ocaml rules 3" fetch_ocaml_rules;
+      t "fetch ocaml rules 4" fetch_ocaml_rules;
+      t "fetch ocaml rules 5" fetch_ocaml_rules;
     ]
 
-let tests caps = pack_suites "OSemgrep Fetch" [ real_fetch_tests caps ]
+let tests caps =
+  Testo.categorize_suites "OSemgrep Fetch" [ real_fetch_tests caps ]

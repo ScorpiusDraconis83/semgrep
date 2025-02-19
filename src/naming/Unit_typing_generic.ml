@@ -2,6 +2,8 @@ open Common
 open Fpath_.Operators
 module G = AST_generic
 
+let t = Testo.create
+
 (*****************************************************************************)
 (* Unit tests *)
 (*****************************************************************************)
@@ -11,13 +13,12 @@ let tests_path = Fpath.v "tests"
 let tests_path_typing = tests_path / "typing"
 
 let tests parse_program parse_pattern =
-  Alcotest_ext.pack_tests "typing_tests"
+  Testo.categorize "typing_tests"
     [
-      ( "test basic variable definitions java",
-        fun () ->
+      t "test basic variable definitions java" (fun () ->
           let file = tests_path_typing / "VarDef.java" in
           try
-            let ast = parse_program !!file in
+            let ast = parse_program file in
             let lang = Lang.lang_of_filename_exn file in
             Naming_AST.resolve lang ast;
 
@@ -40,12 +41,11 @@ let tests parse_program parse_pattern =
             v#visit_program () ast
           with
           | Parsing_error.Syntax_error _ ->
-              Alcotest.failf "it should correctly parse %s" !!file );
-      ( "test multiple variable definitions java",
-        fun () ->
+              Alcotest.failf "it should correctly parse %s" !!file);
+      t "test multiple variable definitions java" (fun () ->
           let file = tests_path_typing / "EqVarCmp.java" in
           try
-            let ast = parse_program !!file in
+            let ast = parse_program file in
             let lang = Lang.lang_of_filename_exn file in
             Naming_AST.resolve lang ast;
 
@@ -89,12 +89,11 @@ let tests parse_program parse_pattern =
             v#visit_program () ast
           with
           | Parsing_error.Syntax_error _ ->
-              Alcotest.failf "it should correctly parse %s" !!file );
-      ( "test basic params java",
-        fun () ->
+              Alcotest.failf "it should correctly parse %s" !!file);
+      t "test basic params java" (fun () ->
           let file = tests_path_typing / "BasicParam.java" in
           try
-            let ast = parse_program !!file in
+            let ast = parse_program file in
             let lang = Lang.lang_of_filename_exn file in
             Naming_AST.resolve lang ast;
 
@@ -130,12 +129,11 @@ let tests parse_program parse_pattern =
             v#visit_program () ast
           with
           | Parsing_error.Syntax_error _ ->
-              Alcotest.failf "it should correctly parse %s" !!file );
-      ( "test class field types",
-        fun () ->
+              Alcotest.failf "it should correctly parse %s" !!file);
+      t "test class field types" (fun () ->
           let file = tests_path_typing / "ClassFields.java" in
           try
-            let ast = parse_program !!file in
+            let ast = parse_program file in
             let lang = Lang.lang_of_filename_exn file in
             Naming_AST.resolve lang ast;
 
@@ -165,37 +163,38 @@ let tests parse_program parse_pattern =
             v#visit_program () ast
           with
           | Parsing_error.Syntax_error _ ->
-              Alcotest.failf "it should correctly parse %s" !!file );
+              Alcotest.failf "it should correctly parse %s" !!file);
       (* TODO?? why this is here? should be in Unit_parsing. ml *)
-      ( "java_pattern_files",
-        fun () ->
+      t "java_pattern_files" (fun () ->
           let dir = tests_path / "parsing_patterns" / "java" in
           let files = Common2.glob (spf "%s/*.sgrep" !!dir) in
           files
           |> List.iter (fun file ->
                  try
-                   let _ = parse_pattern Lang.Java (UCommon.read_file file) in
+                   let _ =
+                     parse_pattern Lang.Java (UFile.Legacy.read_file file)
+                   in
                    ()
                  with
                  | Parsing_error.Syntax_error _ ->
-                     Alcotest.failf "it should correctly parse %s" file) );
-      ( "go_pattern_files",
-        fun () ->
+                     Alcotest.failf "it should correctly parse %s" file));
+      t "go_pattern_files" (fun () ->
           let dir = tests_path / "parsing_patterns" / "go" in
           let files = Common2.glob (spf "%s/*.sgrep" !!dir) in
           files
           |> List.iter (fun file ->
                  try
-                   let _ = parse_pattern Lang.Go (UCommon.read_file file) in
+                   let _ =
+                     parse_pattern Lang.Go (UFile.Legacy.read_file file)
+                   in
                    ()
                  with
                  | Parsing_error.Syntax_error _ ->
-                     Alcotest.failf "it should correctly parse %s" file) );
-      ( "test basic variable definitions go",
-        fun () ->
+                     Alcotest.failf "it should correctly parse %s" file));
+      t "test basic variable definitions go" (fun () ->
           let file = tests_path_typing / "StaticVarDef.go" in
           try
-            let ast = parse_program !!file in
+            let ast = parse_program file in
             let lang = Lang.lang_of_filename_exn file in
             Naming_AST.resolve lang ast;
 
@@ -218,12 +217,11 @@ let tests parse_program parse_pattern =
             v#visit_program () ast
           with
           | Parsing_error.Syntax_error _ ->
-              Alcotest.failf "it should correctly parse %s" !!file );
-      ( "test basic function call go",
-        fun () ->
+              Alcotest.failf "it should correctly parse %s" !!file);
+      t "test basic function call go" (fun () ->
           let file = tests_path_typing / "FuncParam.go" in
           try
-            let ast = parse_program !!file in
+            let ast = parse_program file in
             let lang = Lang.lang_of_filename_exn file in
             Naming_AST.resolve lang ast;
 
@@ -266,12 +264,11 @@ let tests parse_program parse_pattern =
             v#visit_program () ast
           with
           | Parsing_error.Syntax_error _ ->
-              Alcotest.failf "it should correctly parse %s" !!file );
-      ( "test inferred variable definitions go",
-        fun () ->
+              Alcotest.failf "it should correctly parse %s" !!file);
+      t "test inferred variable definitions go" (fun () ->
           let file = tests_path_typing / "PropVarDef.go" in
           try
-            let ast = parse_program !!file in
+            let ast = parse_program file in
             let lang = Lang.lang_of_filename_exn file in
             Naming_AST.resolve lang ast;
 
@@ -308,5 +305,5 @@ let tests parse_program parse_pattern =
             v#visit_program () ast
           with
           | Parsing_error.Syntax_error _ ->
-              Alcotest.failf "it should correctly parse %s" !!file );
+              Alcotest.failf "it should correctly parse %s" !!file);
     ]

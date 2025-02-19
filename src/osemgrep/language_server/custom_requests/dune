@@ -1,9 +1,0 @@
-(library
- (public_name semgrep.language_server.custom_requests)
- (name osemgrep_language_server_custom_requests)
- (wrapped false)
- (libraries
-   semgrep.language_server.util
-   osemgrep_language_server_server
- )
-)

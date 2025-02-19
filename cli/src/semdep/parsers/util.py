@@ -11,6 +11,7 @@ causing no runtime errors.
 """
 from __future__ import annotations
 
+import re
 from base64 import b16encode
 from base64 import b64decode
 from dataclasses import dataclass
@@ -20,13 +21,16 @@ from typing import Any
 from typing import Callable
 from typing import cast
 from typing import Dict
+from typing import Generator
 from typing import Generic
 from typing import List
+from typing import Optional
 from typing import Tuple
 from typing import TypeVar
 
 from ruamel.yaml import YAMLError
 
+import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semdep.external.parsy import alt
 from semdep.external.parsy import fail
 from semdep.external.parsy import line_info
@@ -35,10 +39,10 @@ from semdep.external.parsy import Parser
 from semdep.external.parsy import regex
 from semdep.external.parsy import string
 from semdep.external.parsy import success
-from semgrep.console import console
 from semgrep.semgrep_interfaces.semgrep_output_v1 import DependencyChild
 from semgrep.semgrep_interfaces.semgrep_output_v1 import DependencyParserError
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Direct
+from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
 from semgrep.semgrep_interfaces.semgrep_output_v1 import ScaParserName
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Transitive
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Transitivity
@@ -54,6 +58,59 @@ B = TypeVar("B")
 C = TypeVar("C")
 
 Pos = Tuple[int, int]
+
+
+@dataclass
+class DependencyParser:
+    parser: Callable[
+        [Path, Optional[Path]],
+        Tuple[List[FoundDependency], List[DependencyParserError]],
+    ]
+
+    def __call__(
+        self, lockfile_path: Path, manifest_path: Optional[Path]
+    ) -> Tuple[
+        List[FoundDependency], List[DependencyParserError | out.ScaResolutionError]
+    ]:
+        try:
+            # Covariant subtyping doesn't work in mypy :(
+            return self.parser(lockfile_path, manifest_path)  # type: ignore[return-value]
+        except Exception as e:
+            logger.error(f"Failed to parse {lockfile_path} with exception {e}")
+            return (
+                [],
+                [
+                    out.ScaResolutionError(
+                        type_=out.ResolutionErrorKind(
+                            out.ParseDependenciesFailed(str(e))
+                        ),
+                        dependency_source_file=out.Fpath(str(lockfile_path)),
+                    )
+                ],
+            )
+
+
+LegacyDependencyParser = Callable[
+    [Path, str, Optional[str]], Generator[FoundDependency, None, None]
+]
+
+
+def to_parser(parser: LegacyDependencyParser) -> DependencyParser:
+    """
+    Converts a legacy parser to a new parser format.
+    Legacy parsers return a generator of FoundDependency objects, while new parsers
+    return a tuple of a list of FoundDependency objects and a list of DependencyParserError.
+    """
+
+    def wrapped_parser(
+        lockfile_path: Path, manifest_path: Optional[Path]
+    ) -> Tuple[List[FoundDependency], List[DependencyParserError]]:
+        lockfile_text = lockfile_path.read_text()
+        manifest_text = manifest_path.read_text() if manifest_path else None
+        dependencies = list(parser(lockfile_path, lockfile_text, manifest_text))
+        return dependencies, []
+
+    return DependencyParser(wrapped_parser)
 
 
 def not_any(*chars: str) -> Parser[str]:
@@ -219,6 +276,10 @@ def parse_error_to_str(e: ParseError) -> str:
         return f"expected one of {expected_list}"
 
 
+def filter_on_marked_lines(result: list[Any]) -> list[tuple]:
+    return [x for x in result if isinstance(x, tuple)]
+
+
 @dataclass
 class DependencyFileToParse(Generic[A]):
     path: Path
@@ -242,8 +303,14 @@ def parse_dependency_file(
     if not file_to_parse:
         return None
 
-    text = file_to_parse.path.read_text()
+    text = file_to_parse.path.read_text(errors="replace")
     text = file_to_parse.preprocessor(text)
+
+    if not text.strip():
+        reason = f"{file_to_parse.path} is unexpectedly empty."
+        return DependencyParserError(
+            out.Fpath(str(file_to_parse.path)), file_to_parse.parser_name, reason
+        )
 
     try:
         if isinstance(file_to_parse.parser, Parser):
@@ -253,51 +320,51 @@ def parse_dependency_file(
 
     except YAMLError as e:
         return DependencyParserError(
-            file_to_parse.path.name, file_to_parse.parser_name, str(e)
+            out.Fpath(file_to_parse.path.name), file_to_parse.parser_name, str(e)
         )
     except RecursionError:
         reason = "Python recursion depth exceeded, try again with SEMGREP_PYTHON_RECURSION_LIMIT_INCREASE set higher than 500"
-        console.print(f"Failed to parse {file_to_parse.path} - {reason}")
         return DependencyParserError(
-            str(file_to_parse.path), file_to_parse.parser_name, reason
+            out.Fpath(str(file_to_parse.path)), file_to_parse.parser_name, reason
         )
     except ParseError as e:
         # These are zero indexed but most editors are one indexed
         line, col = e.index.line, e.index.column
-        line_prefix = f"{line + 1} | "
         text_lines = text.splitlines() + (
             ["<trailing newline>"] if text.endswith("\n") else []
         )  # Error on trailing newline shouldn't blow us up
         error_str = parse_error_to_str(e)
-        location = (
-            f"[bold]{file_to_parse.path}[/bold] at [bold]{line + 1}:{col + 1}[/bold]"
-        )
 
         if line < len(text_lines):
             offending_line = text_lines[line]
-            console.print(
-                f"Failed to parse {location} - {error_str}\n"
-                f"{line_prefix}{offending_line}\n"
-                f"{' ' * (col + len(line_prefix))}^"
-            )
             return DependencyParserError(
-                str(file_to_parse.path),
+                out.Fpath(str(file_to_parse.path)),
                 file_to_parse.parser_name,
                 error_str,
                 line + 1,
                 col + 1,
                 offending_line,
             )
+        elif line == 0 and col == 0:
+            reason = (
+                f"Parser failed at the beginning of {file_to_parse.path}.\n{error_str}"
+            )
+            return DependencyParserError(
+                out.Fpath(str(file_to_parse.path)), file_to_parse.parser_name, reason
+            )
         else:
             reason = f"{error_str}\nInternal Error - line {line + 1} is past the end of {file_to_parse.path}?"
-            console.print(f"Failed to parse {location} - {reason}")
             return DependencyParserError(
-                str(file_to_parse.path),
+                out.Fpath(str(file_to_parse.path)),
                 file_to_parse.parser_name,
                 reason,
                 line + 1,
                 col + 1,
             )
+    except Exception as e:
+        return DependencyParserError(
+            out.Fpath(file_to_parse.path.name), file_to_parse.parser_name, str(e)
+        )
 
 
 def safe_parse_lockfile_and_manifest(
@@ -371,7 +438,7 @@ class JSON:
             Pos,
             None | bool | str | float | int | list[JSON] | dict[str, JSON],
             Pos,
-        ]
+        ],
     ) -> JSON:
         return JSON(marked[0][0] + 1, marked[1])
 
@@ -390,6 +457,7 @@ class JSON:
 
 # Utilities
 whitespace = regex(r"\s*")
+new_lines = regex("\n+", re.MULTILINE)
 
 
 def lexeme(p: Parser[A]) -> Parser[A]:
@@ -399,6 +467,8 @@ def lexeme(p: Parser[A]) -> Parser[A]:
 # Punctuation
 lbrace = lexeme(string("{"))
 rbrace = lexeme(string("}"))
+lparen = lexeme(string("("))
+rparen = lexeme(string(")"))
 lbrack = lexeme(string("["))
 rbrack = lexeme(string("]"))
 colon = lexeme(string(":"))

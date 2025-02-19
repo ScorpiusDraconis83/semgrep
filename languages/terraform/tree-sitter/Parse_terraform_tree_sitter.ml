@@ -14,6 +14,7 @@
  *)
 open Common
 open Either_
+open Fpath_.Operators
 module CST = Tree_sitter_hcl.CST
 module H = Parse_tree_sitter_helpers
 open AST_terraform
@@ -449,8 +450,8 @@ and map_object_elem (env : env) (x : CST.object_elem) : G.field =
         | N n -> G.EN n
         | _ -> G.EDynamic v1
       in
-      let ent = { G.name = n_or_dyn; attrs = []; tparams = [] } in
-      let vdef = { G.vinit = Some v3; vtype = None } in
+      let ent = { G.name = n_or_dyn; attrs = []; tparams = None } in
+      let vdef = { G.vinit = Some v3; vtype = None; vtok = G.no_sc } in
       let def =
         match v2 with
         | Left _teq -> G.VarDef vdef
@@ -459,7 +460,7 @@ and map_object_elem (env : env) (x : CST.object_elem) : G.field =
       (ent, def) |> G.fld
   | `Semg_ellips v1 ->
       let v1 = token env v1 in
-      G.fieldEllipsis v1
+      G.field_ellipsis v1
 
 and map_object_elems (env : env) ((v1, v2, v3) : CST.object_elems) =
   let v1 = map_object_elem env v1 in
@@ -501,7 +502,7 @@ and map_splat (env : env) (x : CST.splat) =
   | `Attr_splat (v1, v2) ->
       let v1 = (* ".*" *) token env v1 in
       let f1 e =
-        let access = G.FDynamic (G.IdSpecial (G.HashSplat, v1) |> G.e) in
+        let access = G.FDynamic (G.Special (G.HashSplat, v1) |> G.e) in
         G.DotAccess (e, v1, access) |> G.e
       in
       let v2 = List_.map (map_anon_choice_get_attr_7bbf24f env) v2 in
@@ -509,7 +510,7 @@ and map_splat (env : env) (x : CST.splat) =
   | `Full_splat (v1, v2) ->
       let v1 = (* "[*]" *) token env v1 in
       let f1 e =
-        let access = G.IdSpecial (G.HashSplat, v1) |> G.e in
+        let access = G.Special (G.HashSplat, v1) |> G.e in
         G.ArrayAccess (e, (v1, access, v1)) |> G.e
       in
       let v2 = List_.map (map_anon_choice_get_attr_7bbf24f env) v2 in
@@ -630,8 +631,8 @@ let map_config_file (env : env) (x : CST.config_file) : any =
 (*****************************************************************************)
 let parse file =
   H.wrap_parser
-    (fun () -> Tree_sitter_hcl.Parse.file file)
-    (fun cst ->
+    (fun () -> Tree_sitter_hcl.Parse.file !!file)
+    (fun cst _extras ->
       let env = { H.file; conv = H.line_col_to_pos file; extra = () } in
       match map_config_file env cst with
       | Pr xs -> xs
@@ -649,7 +650,7 @@ let parse_expression_or_source_file str =
 let parse_pattern str =
   H.wrap_parser
     (fun () -> parse_expression_or_source_file str)
-    (fun cst ->
-      let file = "<pattern>" in
-      let env = { H.file; conv = Hashtbl.create 0; extra = () } in
+    (fun cst _extras ->
+      let file = Fpath.v "<pattern>" in
+      let env = { H.file; conv = H.line_col_to_pos_pattern str; extra = () } in
       map_config_file env cst)

@@ -41,7 +41,7 @@ let lang_to_python_parsing_mode = function
 (* Entry point *)
 (*****************************************************************************)
 
-let just_parse_with_lang lang file =
+let just_parse_with_lang lang file : Parsing_result2.t =
   if lang =*= Lang.C && Sys.file_exists !!(!Flag_parsing_cpp.macros_h) then
     Parse_cpp.init_defs !Flag_parsing_cpp.macros_h;
 
@@ -57,22 +57,16 @@ let just_parse_with_lang lang file =
         errors = [];
         skipped_tokens = [];
         inserted_tokens = [];
-        stat = Parsing_stat.default_stat file;
+        tolerated_errors = [];
+        stat = Parsing_stat.default_stat !!file;
       }
   (* Menhir and Tree-sitter *)
-  | Lang.C ->
-      run file
-        [
-          (* this internally uses the CST for C++ *)
-          Pfff (throw_tokens (fun file -> Parse_c.parse (Fpath.v file)));
-          TreeSitter Parse_c_tree_sitter.parse;
-        ]
-        C_to_generic.program
+  | Lang.C
   | Lang.Cpp ->
       run file
         [
           TreeSitter Parse_cpp_tree_sitter.parse;
-          Pfff (throw_tokens (fun file -> Parse_cpp.parse (Fpath.v file)));
+          Pfff (throw_tokens Parse_cpp.parse);
         ]
         Cpp_to_generic.program
   | Lang.Go ->
@@ -158,11 +152,10 @@ let just_parse_with_lang lang file =
         Dockerfile_to_generic.program
   | Lang.Jsonnet ->
       run file
-        [
-          TreeSitter
-            (fun file -> Parse_jsonnet_tree_sitter.parse (Fpath.v file));
-        ]
+        [ TreeSitter Parse_jsonnet_tree_sitter.parse ]
         Jsonnet_to_generic.program
+  | Lang.Ql ->
+      run file [ TreeSitter Parse_ql_tree_sitter.parse ] QL_to_generic.program
   | Lang.Terraform ->
       run file
         [ TreeSitter Parse_terraform_tree_sitter.parse ]
@@ -171,28 +164,13 @@ let just_parse_with_lang lang file =
       run file
         [ TreeSitter (Parse_typescript_tree_sitter.parse ?dialect:None) ]
         Js_to_generic.program
-  | Lang.Vue ->
-      let parse_embedded_js file =
-        let { Parsing_result2.ast; errors; _ } =
-          Parse_target.just_parse_with_lang Lang.Js file
-        in
-        (* TODO: pass the errors down to Parse_vue_tree_sitter.parse
-         * and accumulate with other vue parse errors
-         *)
-        if errors <> [] then failwith "parse error in embedded JS";
-        ast
-      in
-      run file
-        [ TreeSitter (Parse_vue_tree_sitter.parse parse_embedded_js) ]
-        (fun x -> x)
+  | Lang.Vue -> failwith "Vue support has been removed in 1.93.0"
   (* there is no pfff parsers for C#/Kotlin/... so let's just use
    * tree-sitter, and there's no ast_xxx.ml either so we directly generate
    * a generic AST (no calls to an xxx_to_generic() below)
    *)
   | Lang.Cairo ->
       run file [ TreeSitter Parse_cairo_tree_sitter.parse ] (fun x -> x)
-  | Lang.Csharp ->
-      run file [ TreeSitter Parse_csharp_tree_sitter.parse ] (fun x -> x)
   | Lang.Ruby ->
       run file
         [ TreeSitter Parse_ruby_tree_sitter.parse ]
@@ -229,8 +207,23 @@ let just_parse_with_lang lang file =
   | Lang.Swift ->
       run file [ TreeSitter Parse_swift_tree_sitter.parse ] (fun x -> x)
   | Lang.R -> run file [ TreeSitter Parse_r_tree_sitter.parse ] (fun x -> x)
+  | Lang.Move_on_sui ->
+      run file [ TreeSitter Parse_move_on_sui_tree_sitter.parse ] (fun x -> x)
+  | Lang.Move_on_aptos ->
+      run file [ TreeSitter Parse_move_on_aptos_tree_sitter.parse ] (fun x -> x)
+  | Lang.Circom ->
+      run file [ TreeSitter Parse_circom_tree_sitter.parse ] (fun x -> x)
   (* External proprietary parsers. The parsers need to register themselves
    * for parsing to take place.
    *)
   | Lang.Apex -> run_external_parser file Parsing_plugin.Apex.parse_target
+  | Lang.Csharp ->
+      let parse_target =
+        (* Use the proprietary parser if available *)
+        if Parsing_plugin.Csharp.is_available () then
+          Parsing_plugin.Csharp.parse_target
+        else Parse_csharp_tree_sitter.parse
+      in
+      run file [ TreeSitter parse_target ] (fun x -> x)
   | Lang.Elixir -> run_external_parser file Parsing_plugin.Elixir.parse_target
+(* TODO *)

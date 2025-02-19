@@ -1,29 +1,32 @@
-(* Small wrapper around the 'git' command-line program *)
+(* Small wrapper around the 'git' command-line program.
+ *
+ * The functions in this module will call the external 'git' program, hence
+ * the use of the Cap.exec capability.
+ * TODO: generalize the use of Cap.exec to all functions!
+ *)
 
-(* TODO: make sub capability with cap_git_exec *)
-
+(* many of the functions in this module can raise Error if git does not
+ * exist or fail to run for some reasons.
+ *)
 exception Error of string
 
 (* very general helper to run a git command and return its output
  * if everthing went fine or log the error (using Logs) and
- * raise an Error otherwise
+ * raise an Error exn otherwise.
  *)
-val git_check_output : Cap.Exec.t -> Cmd.args -> string
+val command : < Cap.exec > -> Cmd.args -> string
 
-(*
-   This is incomplete. Git offer a variety of filters and subfilters,
-   and it would be a lot of work to translate them all into clean types.
-   Please extend this interface as needed.
-*)
 type ls_files_kind =
+  (* --cached, the default:
+   * Show all files cached in Git’s index, i.e. all tracked files
+   *)
   | Cached
-    (* --cached, the default:
-       Show all files cached in Git’s index, i.e. all tracked files *)
+  (* --others:
+   * Show other (i.e. untracked) files in the output,
+   * that is mostly the complement of Cached but still
+   * excluding .git/
+   *)
   | Others
-(* --others:
-   Show other (i.e. untracked) files in the output,
-   that is mostly the complement of Cached but still
-   excluding .git/ *)
 
 (*
    cwd: directory to cd into (-C)
@@ -34,10 +37,14 @@ type ls_files_kind =
    This returns a list of paths relative to cwd.
 *)
 val ls_files :
-  ?cwd:Fpath.t -> ?kinds:ls_files_kind list -> Fpath.t list -> Fpath.t list
+  ?cwd:Fpath.t ->
+  ?exclude_standard:bool ->
+  ?kinds:ls_files_kind list ->
+  Fpath.t list ->
+  Fpath.t list
 
 (* get merge base between arg and HEAD *)
-val get_merge_base : string -> string
+val merge_base : string -> string
 
 (* Executing a function inside a directory created from git-worktree.
 
@@ -56,7 +63,11 @@ val get_merge_base : string -> string
    don't need to git stash anything, or expect a clean working tree.
 *)
 val run_with_worktree :
-  commit:string -> ?branch:string option -> (unit -> 'a) -> 'a
+  < Cap.chdir ; Cap.tmp ; .. > ->
+  commit:string ->
+  ?branch:string ->
+  (unit -> 'a) ->
+  'a
 
 type status = {
   added : string list;
@@ -70,17 +81,52 @@ type status = {
 (* git status *)
 val status : ?cwd:Fpath.t -> ?commit:string -> unit -> status
 
-(* precondition: cwd must be a directory *)
-val is_git_repo : ?cwd:Fpath.t -> unit -> bool
-(** Returns true if passed directory a git repo*)
+(*
+   Find the root of the git worktree for any files contained in the
+   specified folder.
 
-(* Find the root of the repository containing 'cwd', if any.
-   The result may be a submodule of another git repo. *)
-val get_project_root : ?cwd:Fpath.t -> unit -> Fpath.t option
+   For example, "/projects/my-git-project" will return
+   (Some "/projects/my-git-project")
+   if "/projects/my-git-project" is the root of a git repo (or worktree).
 
-(* Find the root of the git project containing 'cwd', if any.
-   The result is not a submodule of another git repo. *)
-val get_superproject_root : ?cwd:Fpath.t -> unit -> Fpath.t option
+   'None' is returned in case of an error.
+*)
+val project_root_for_files_in_dir : Fpath.t -> Fpath.t option
+
+(*
+   Determine the project root for a *member* of a git project.
+
+   If the argument is the root of git submodule, the root of the parent
+   project is returned.
+
+   For example, "/projects/my-git-project" will return None
+   even though "/projects/my-git-project" is the root of a git repo.
+*)
+val project_root_for_file : Fpath.t -> Fpath.t option
+
+(*
+   If the argument is a directory, return the project root associated with
+   the files it contains. If the argument is another kind of file
+   (normally a regular file or a symlink), then the root of the project
+   containing this file is returned.
+*)
+val project_root_for_file_or_files_in_dir : Fpath.t -> Fpath.t option
+
+(* Determine whether a path is tracked by git. *)
+val is_tracked_by_git : Fpath.t -> bool
+
+val checkout : ?cwd:Fpath.t -> ?git_ref:string -> unit -> unit
+(** Checkout the given optional ref *)
+
+val sparse_shallow_filtered_checkout : Uri.t -> Fpath.t -> (unit, string) result
+(** Checkout the given commit in the given directory, but only
+    the files that are tracked by git and that are not in the
+    sparse-checkout config.
+    This is useful to avoid checking out the whole repo when
+    we only need a few files. *)
+
+val sparse_checkout_add : ?cwd:Fpath.t -> Fpath.t list -> (unit, string) result
+(** Add the given files to the sparse-checkout config *)
 
 (* precondition: cwd must be a directory *)
 val dirty_lines_of_file :
@@ -91,37 +137,104 @@ val dirty_lines_of_file :
   *)
 
 (* precondition: cwd must be a directory *)
-val is_tracked_by_git : ?cwd:Fpath.t -> Fpath.t -> bool
-(** [is_tracked_by_git path] Returns true if the file is tracked by git *)
-
-(* precondition: cwd must be a directory *)
-val dirty_files : ?cwd:Fpath.t -> unit -> Fpath.t list
-(** Returns a list of files that are dirty in a git repo *)
+val dirty_paths : ?cwd:Fpath.t -> unit -> Fpath.t list
+(** [dirty_paths ()] is the list of paths which are dirty in a git repo, i.e.,
+    paths which differ at all from the current index to the HEAD commit, plus
+    untracked files. Note that this means this list includes paths which were
+    deleted.
+    We use "paths" instead of "files" here because it may include directories,
+    for newly created directories!
+  *)
 
 val init : ?cwd:Fpath.t -> ?branch:string -> unit -> unit
-(** Initialize a git repo in the given directory.
+(** [init ()] creates an empty git repository in the current directory. If
+    [cwd] is specified, its value is passed to git's [-C] flag. If
+    [branch] is specified, it is used as the name of the default branch.
+    Otherwise the default branch is named 'main' to avoid warnings that depend
+    on the git version.
+
+    Initialize a git repo in the given directory.
     The branch is set by default to 'main' to avoid warnings that depend
     on the git version.
 *)
 
-val add : ?cwd:Fpath.t -> Fpath.t list -> unit
-(** Add the given files to the git repo *)
+(* Set or replace an entry in the user's config tied to the repo. *)
+val config_set : ?cwd:Fpath.t -> string -> string -> unit
+
+(* Get the value of an entry in the user's config. *)
+val config_get : ?cwd:Fpath.t -> string -> string option
+
+val gc : ?cwd:Fpath.t -> unit -> unit
+(** [gc ()] executes [git gc] in the current directory. If [cwd] is specified,
+    its value is passed to git's [-C] flag. *)
+
+val add : ?cwd:Fpath.t -> ?force:bool -> Fpath.t list -> unit
+(** [add files] adds the [files] to the git index. *)
 
 val commit : ?cwd:Fpath.t -> string -> unit
-(** Commit the given files to the git repo with the given message *)
+(** [commit msg] creates a commit with containing the current contents of the
+    index with [msg] as the commit message. *)
 
-val get_project_url : ?cwd:Fpath.t -> unit -> string option
-(** [get_project_url ()] tries to get the URL of the project from
+val project_url : ?cwd:Fpath.t -> unit -> string option
+(** [project_url ()] tries to get the URL of the project from
     [git ls-remote] or from the [.git/config] file. It returns [None] if it
     found nothing relevant.
     TODO: should maybe raise an exn instead if not run from a git repo.
 *)
 
-val get_git_logs : ?cwd:Fpath.t -> ?since:float option -> unit -> string list
-(** [get_git_logs()] will run 'git log' in the current directory
-    and returns for each log a JSON string that fits the schema
-    defined in semgrep_output_v1.atd contribution type.
+type contribution = {
+  commit_hash : string;
+  (* datetime *)
+  commit_timestamp : string;
+  commit_author_name : string;
+  commit_author_email : string;
+}
+
+val logs : ?cwd:Fpath.t -> ?since:float -> < Cap.exec > -> contribution list
+(** [logs ()] will run 'git log' in the current directory and returns for each
+    log a contribution record.
     It returns an empty list if it found nothing relevant.
-    You can use the [since] parameter to restrict the logs to
-    the commits since the specified time.
+    You can use the [since] parameter to restrict the logs to the commits since
+    the specified time.
  *)
+
+type hash = Digestif.SHA1.t [@@deriving show, eq, ord]
+type value = hash Git.Value.t [@@deriving show, eq, ord]
+type commit = hash Git.Commit.t [@@deriving show, eq, ord]
+type author = Git.User.t [@@deriving show, eq, ord]
+type blob = Git.Blob.t [@@deriving show, eq, ord]
+type object_table = (hash, value) Hashtbl.t
+
+type blob_with_extra = { blob : blob; path : Fpath.t; size : int }
+[@@deriving show]
+
+val commit_digest : commit -> hash
+(** [commit_digest commit] is the SHA of the commit*)
+
+val commit_author : commit -> author
+(** [commit_author commit] is the author of the commit*)
+
+val blob_digest : blob -> hash
+(** [blob_digest blob] is the SHA of the blob*)
+
+val string_of_blob : blob -> string
+(** [string_of_blob blob] is the content of the blob*)
+
+val hex_of_hash : hash -> string
+(** [hex_of_hash hash] is the hexadecimal representation of the hash*)
+
+val commit_blobs_by_date : object_table -> (commit * blob_with_extra list) list
+(** [commit_blobs_by_date store] is the list of commits and the blobs they reference, ordered by date, newest first*)
+
+val cat_file_blob : ?cwd:Fpath.t -> hash -> (string, string) result
+(** [cat_file_blob sha] will run [git cat-file blob sha] and return either
+    {ul
+      {- [Ok contents], where [contents] is the contents of the blob; or}
+      {- [Error message] where [message] is a brief message indicating why git
+      could not perform the action, e.g., [hash] is not the sha of a blob or
+      [hash] does not designate an object.}
+    }
+ *)
+
+val remote_repo_name : string -> string option
+(** [remote_repo_name "https://github.com/semgrep/semgrep.git"] will return [Some "semgrep"] *)

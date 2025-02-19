@@ -1,1 +1,1 @@
-val tests : < Cap.network > -> Alcotest_ext.test list
+val tests : < Rule_fetching.caps ; .. > -> Testo.t list

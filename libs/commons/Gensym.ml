@@ -45,12 +45,22 @@ end = struct
   open Ppx_hash_lib.Std.Hash.Builtin
   open Sexplib.Std
 
-  type t = int [@@deriving show, eq, ord, hash, sexp]
+  type t = int [@@deriving show, eq, hash, sexp]
   type partition = A | B
 
   let partition = ref A
   let set_partition p = partition := p
   let counter_a = ref 0
+
+  (* Why not just type t [@@deriving ord]?
+   *
+   * For some reason, ppx derives a function that allocates a closure
+   * unnecessarily, causing IL.compare_name to be responsible for
+   * ~7% of all allocations throughout a semgrep run!
+   *
+   * See: https://github.com/semgrep/semgrep-proprietary/pull/2266
+   *)
+  let compare = Int.compare
 
   (* We could use min_int and increment, but small negative numbers are
    * represented more compactly both in string-based serialization formats and

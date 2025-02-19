@@ -3,8 +3,7 @@ open Ast_cpp
 open Either_
 module Ast = Ast_cpp
 module Flag = Flag_parsing
-
-let logger = Logging.get_logger [ __MODULE__ ]
+module Log = Log_parser_cpp.Log
 
 (*****************************************************************************)
 (* Wrappers *)
@@ -160,7 +159,7 @@ let id_of_dname_for_typedef dname =
   | _ -> error "expecting an ident for typedef" (ii_of_dname dname)
 
 let make_onedecl ~v_namei ~mods ~sto v_type : onedecl =
-  let specs = mods |> List.map (fun m -> M m) in
+  let specs = mods |> List_.map (fun m -> M m) in
   match v_namei with
   (* less: could check sto, because typedef can't be anonymous since c++17
    * lesS: use mods?
@@ -291,7 +290,8 @@ let fixFunc ((name, ty, _stoTODO), cp) : func_definition =
                  | _ -> ()));
         ftyp
     | _ ->
-        logger#error "weird, not a functionType. Got %s" (Ast_cpp.show_type_ ty);
+        Log.warn (fun m ->
+            m "weird, not a functionType. Got %s" (Ast_cpp.show_type_ ty));
         (* this is possible if someone used a typedef to a function type, or
          * when tree-sitter-cpp did some error recovery and wrongly parsed
          * something as a function when it's really not

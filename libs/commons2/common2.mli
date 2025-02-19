@@ -109,7 +109,7 @@ val redirect_stdout_opt : filename option -> (unit -> 'a) -> 'a
 val redirect_stdout_stderr : filename -> (unit -> unit) -> unit
 val redirect_stdin : filename -> (unit -> unit) -> unit
 val redirect_stdin_opt : filename option -> (unit -> unit) -> unit
-val with_pr2_to_string : (unit -> unit) -> string list
+val with_pr2_to_string : Cap.FS.tmp -> (unit -> unit) -> string list
 
 (* default = stderr *)
 val _chan : out_channel ref
@@ -217,20 +217,6 @@ val laws : string -> ('a -> bool) -> 'a gen -> 'a option
 val statistic_number : 'a list -> (int * 'a) list
 val statistic : 'a list -> (int * 'a) list
 val laws2 : string -> ('a -> bool * 'b) -> 'a gen -> 'a option * (int * 'b) list
-
-(*****************************************************************************)
-(* Persistence *)
-(*****************************************************************************)
-
-(* just wrappers around Marshal *)
-val get_value : filename -> 'a
-val read_value : filename -> 'a (* alias *)
-val write_value : 'a -> filename -> unit
-val write_back : ('a -> 'b) -> filename -> unit
-
-(* wrappers that also use profile_code *)
-val marshal__to_string : 'a -> Marshal.extern_flags list -> string
-val marshal__from_string : string -> int -> 'a
 
 (*****************************************************************************)
 (* Counter *)
@@ -422,7 +408,6 @@ val int_of_stringbits : string -> int
 val int_of_octal : string -> int
 val int_of_all : string -> int
 val int64_of_string_opt : string -> int64 option
-val int_of_string_opt : string -> int option
 
 (* like int_of_string_opt, but also converts C octals like 0400 in
  * the right value. *)
@@ -482,7 +467,7 @@ end
 (* Random *)
 (*****************************************************************************)
 
-val _init_random : unit
+(* val _init_random : unit *)
 val random_list : 'a list -> 'a
 val randomize_list : 'a list -> 'a list
 val random_subset_of_list : int -> 'a list -> 'a list
@@ -776,11 +761,15 @@ val is_directory_eff : path -> bool
 val is_file_eff : path -> bool
 val is_executable_eff : filename -> bool
 val capsule_unix : ('a -> unit) -> 'a -> unit
-val readdir_to_kind_list : string -> Unix.file_kind -> string list
-val readdir_to_dir_list : string -> dirname list
-val readdir_to_file_list : string -> filename list
-val readdir_to_link_list : string -> string list
-val readdir_to_dir_size_list : string -> (string * int) list
+
+(* deprecated, should use CapFS or libs/paths/List_files.mli
+   val readdir_to_kind_list : string -> Unix.file_kind -> string list
+   val readdir_to_dir_list : string -> dirname list
+   val readdir_to_file_list : string -> filename list
+   val readdir_to_link_list : string -> string list
+   val readdir_to_dir_size_list : string -> (string * int) list
+*)
+
 val unixname : unit -> string
 
 val glob : string -> filename list
@@ -805,11 +794,6 @@ val with_open_outfile_append :
   filename -> ((string -> unit) * out_channel -> 'a) -> 'a
 
 val with_open_stringbuf : ((string -> unit) * Buffer.t -> unit) -> string
-val with_tmp_file : str:string -> ext:string -> (filename -> 'a) -> 'a
-
-(* Runs just before a tmp file is deleted. Multiple hooks can be added, but the
- * order in which they are called is unspecified. *)
-val register_tmp_file_cleanup_hook : (string -> unit) -> unit
 
 (*###########################################################################*)
 (* Collection-like types *)

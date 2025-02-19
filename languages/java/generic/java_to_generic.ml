@@ -1,6 +1,6 @@
 (* Yoann Padioleau
  *
- * Copyright (C) 2019 r2c
+ * Copyright (C) 2019 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -158,7 +158,7 @@ let rec modifier (x, tok) =
   | Volatile -> G.attr G.Volatile tok
   | Synchronized -> G.unhandled_keywordattr (s, tok)
   | Native -> G.unhandled_keywordattr (s, tok)
-  | DefaultModifier -> G.unhandled_keywordattr (s, tok)
+  | DefaultModifier -> G.attr G.DefaultImpl tok
   | Sealed -> G.attr G.SealedClass tok
   | NonSealed -> G.unhandled_keywordattr (s, tok)
   | Annotation v1 -> annotation v1
@@ -246,7 +246,7 @@ and literal = function
 
 and expr e =
   (match e with
-  | This t -> G.IdSpecial (G.This, t)
+  | This t -> G.N (G.IdSpecial ((G.This, t), G.empty_id_info ()))
   | ObjAccessEllipsis (v1, v2) ->
       let v1 = expr v1 in
       G.DotAccessEllipsis (v1, v2)
@@ -310,7 +310,7 @@ and expr e =
       let anys =
         [ G.E v0; G.T v2 ]
         @ (v3 |> Tok.unbracket |> List_.map (fun arg -> G.Ar arg))
-        @ (Option.to_list v4 |> List_.map Tok.unbracket |> List.flatten
+        @ (Option.to_list v4 |> List_.map Tok.unbracket |> List_.flatten
           |> List_.map (fun st -> G.S st))
       in
       G.OtherExpr (("NewQualifiedClass", tok2), anys)
@@ -333,17 +333,16 @@ and expr e =
   | Postfix (v1, (v2, tok)) ->
       let v1 = expr v1 and v2 = fix_op v2 in
       G.Call
-        (G.IdSpecial (G.IncrDecr (v2, G.Postfix), tok) |> G.e, fb [ G.Arg v1 ])
+        (G.Special (G.IncrDecr (v2, G.Postfix), tok) |> G.e, fb [ G.Arg v1 ])
   | Prefix ((v1, tok), v2) ->
       let v1 = fix_op v1 and v2 = expr v2 in
-      G.Call
-        (G.IdSpecial (G.IncrDecr (v1, G.Prefix), tok) |> G.e, fb [ G.Arg v2 ])
+      G.Call (G.Special (G.IncrDecr (v1, G.Prefix), tok) |> G.e, fb [ G.Arg v2 ])
   | Unary (v1, v2) ->
       let v1, tok = v1 and v2 = expr v2 in
-      G.Call (G.IdSpecial (G.Op v1, tok) |> G.e, fb [ G.Arg v2 ])
+      G.Call (G.Special (G.Op v1, tok) |> G.e, fb [ G.Arg v2 ])
   | Infix (v1, (v2, tok), v3) ->
       let v1 = expr v1 and v2 = v2 and v3 = expr v3 in
-      G.Call (G.IdSpecial (G.Op v2, tok) |> G.e, fb [ G.Arg v1; G.Arg v3 ])
+      G.Call (G.Special (G.Op v2, tok) |> G.e, fb [ G.Arg v1; G.Arg v3 ])
   | Cast ((l, v1, _), v2) ->
       let v1 = list typ v1 and v2 = expr v2 in
       let t =
@@ -353,7 +352,7 @@ and expr e =
   | InstanceOf (v1, v2) ->
       let v1 = expr v1 and v2 = ref_type v2 in
       G.Call
-        ( G.IdSpecial (G.Instanceof, unsafe_fake "instanceof") |> G.e,
+        ( G.Special (G.Instanceof, unsafe_fake "instanceof") |> G.e,
           fb [ G.Arg v1; G.ArgType v2 ] )
   | Conditional (v1, v2, v3) ->
       let v1 = expr v1 and v2 = expr v2 and v3 = expr v3 in
@@ -493,12 +492,12 @@ and stmt_aux st =
   | Throw (t, v1) ->
       let v1 = expr v1 in
       [ G.Throw (t, v1, G.sc) |> G.s ]
-  | LocalVarList vs ->
-      List_.map
-        (fun v1 ->
-          let ent, v = var_with_init v1 in
-          G.DefStmt (ent, G.VarDef v) |> G.s)
-        vs
+  | LocalVarList (vs, sc) ->
+      vs
+      |> List_.map (fun v1 ->
+             let ent, v = var_with_init v1 in
+             (ent, v))
+      |> H.add_semicolon_to_last_var_def_and_convert_to_stmts sc
   | DeclStmt v1 -> [ decl v1 ]
   | DirectiveStmt v1 -> [ directive v1 ]
   | Assert (t, v1, v2) ->
@@ -511,7 +510,7 @@ and tok_and_stmt (t, v) =
   let v = stmt v in
   (t, v)
 
-and stmts v = list stmt_aux v |> List.flatten
+and stmts v = list stmt_aux v |> List_.flatten
 
 and case = function
   | Case (t, v1) ->
@@ -564,7 +563,7 @@ and catch (tok, catch_exn, v2) =
         let ent, typ = var v1 in
         let id, _idinfo = id_of_entname ent.G.name in
         match typ with
-        | Some t -> G.CatchParam (G.param_of_type t ~pname:(Some id))
+        | Some t -> G.CatchParam (G.param_of_type t ~pname:id)
         | None -> error tok "TODO: Catch without a type")
     | CatchEllipsis t -> G.CatchPattern (G.PatEllipsis t)
   in
@@ -575,7 +574,7 @@ and catches v = list catch v
 and var_with_init { f_var; f_init } =
   let ent, t = var f_var in
   let init = option init f_init in
-  (ent, { G.vinit = init; vtype = t })
+  (ent, { G.vinit = init; vtype = t; vtok = G.no_sc })
 
 and init = function
   | ExprInit v1 ->
@@ -598,7 +597,7 @@ and parameter_binding = function
       G.ParamRest (tk, p)
   | ParamEllipsis t -> G.ParamEllipsis t
 
-and method_decl ?(cl_kind = None) { m_var; m_formals; m_throws; m_body } =
+and method_decl ?cl_kind { m_var; m_formals; m_throws; m_body } =
   let ent, rett = var m_var in
   let fparams = parameters m_formals in
   let v3 = list typ m_throws in
@@ -652,8 +651,8 @@ and enum_constant (v1, v2, v3) =
   let def = { G.ee_args = v2; ee_body = v3 } in
   (ent, G.EnumEntryDef def)
 
-and class_body ?(cl_kind = None) (l, xs, r) : G.field list G.bracket =
-  let xs = decls ~cl_kind xs |> List_.map (fun x -> G.F x) in
+and class_body ?cl_kind (l, xs, r) : G.field list G.bracket =
+  let xs = decls ?cl_kind xs |> List_.map (fun x -> G.F x) in
   (l, xs, r)
 
 and class_decl
@@ -669,13 +668,17 @@ and class_decl
     } =
   let v1 = ident cl_name in
   let v2, more_attrs = class_kind_and_more cl_kind in
-  let v3 = list type_parameter cl_tparams in
+  let v3 =
+    match cl_tparams with
+    | [] -> None
+    | xs -> Some (Tok.unsafe_fake_bracket (list type_parameter xs))
+  in
   let v4 = modifiers cl_mods in
   let v5 = option class_parent cl_extends in
   let v6 = list ref_type cl_impls in
   let cparams = parameters cl_formals in
-  let fields = class_body ~cl_kind:(Some cl_kind) cl_body in
-  let ent = G.basic_entity v1 ~attrs:(more_attrs @ v4) ~tparams:v3 in
+  let fields = class_body ~cl_kind cl_body in
+  let ent = G.basic_entity v1 ~attrs:(more_attrs @ v4) ?tparams:v3 in
   let cdef =
     {
       G.ckind = v2;
@@ -695,13 +698,13 @@ and class_kind_and_more (x, t) =
   | AtInterface -> ((G.Interface, t), [ G.attr AnnotationClass t ])
   | Record -> ((G.Class, t), [ G.attr RecordClass t ])
 
-and decl ?(cl_kind = None) decl : G.stmt =
+and decl ?cl_kind decl : G.stmt =
   match decl with
   | Class v1 ->
       let ent, def = class_decl v1 in
       G.DefStmt (ent, G.ClassDef def) |> G.s
   | Method v1 ->
-      let ent, def = method_decl ~cl_kind v1 in
+      let ent, def = method_decl ?cl_kind v1 in
       G.DefStmt (ent, G.FuncDef def) |> G.s
   | Field v1 ->
       let ent, def = field v1 in
@@ -716,16 +719,18 @@ and decl ?(cl_kind = None) decl : G.stmt =
           G.OtherStmtWithStmt (G.OSWS_Block ("Static", tstatic), [], st) |> G.s
       | None -> st)
   | DeclEllipsis v1 -> G.ExprStmt (G.Ellipsis v1 |> G.e, G.sc) |> G.s
+  | DeclMetavarEllipsis v1 ->
+      G.ExprStmt (G.N (Id (v1, G.empty_id_info ())) |> G.e, G.sc) |> G.s
   | EmptyDecl t -> G.Block (t, [], t) |> G.s
   | AnnotationTypeElementTodo t -> G.OtherStmt (G.OS_Todo, [ G.Tk t ]) |> G.s
 
-and decls ?(cl_kind = None) v : G.stmt list = list (decl ~cl_kind) v
+and decls ?cl_kind v : G.stmt list = list (decl ?cl_kind) v
 
 and import = function
   | ImportAll (t, xs, tok) -> G.ImportAll (t, G.DottedName xs, tok)
   | ImportFrom (t, xs, id) ->
       let id = ident id in
-      G.ImportFrom (t, G.DottedName xs, [ (id, None) ])
+      G.ImportFrom (t, G.DottedName xs, [ H.mk_import_from_kind id None ])
 
 and directive = function
   | Import (static, v2) ->
@@ -785,7 +790,7 @@ let any = function
       G.T v1
   | AVar v1 ->
       let ent, t = var v1 in
-      G.Def (ent, G.VarDef { G.vtype = t; vinit = None })
+      G.Def (ent, G.VarDef { G.vtype = t; vinit = None; vtok = G.no_sc })
   | AInit v1 ->
       let v1 = init v1 in
       G.E v1

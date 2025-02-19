@@ -157,8 +157,19 @@ type a_filename = string wrap [@@deriving show]
  *)
 type a_dotted_ident = a_ident list [@@deriving show]
 
-(* when doing export default Foo and import Bar, ... *)
-let default_entity = "!default!"
+(* In ECMAScript modules, there's a notion of a "default" import/export, which
+   is used, e.g., when doing `import bar from 'foo';`
+   (cf. `import { bar } from 'foo';`). In these cases, `default` is a keyword
+   and cannot be used as an identifier, so we can use it here directly to refer
+   to that default entity. This allows us to have a pattern matching the name
+   `foo.default` to match against the imported name in both `import { default
+   as example } from 'foo';` and `import example from 'foo';`, as it ought
+   to---this value being used in the latter case to construct the name.
+
+   When not using ECMAScript modules, this isn't a keyword, but we don't use
+   it, so there's no chance of a conflict.
+*)
+let default_entity = "default"
 
 type property_name =
   (* this can even be a string or number *)
@@ -664,9 +675,9 @@ let build_var kwd (id_or_pat, ty_opt, initopt) =
       (basic_entity id, { v_kind = kwd; v_init = initopt; v_type = ty_opt })
   | Either.Right pat -> var_pattern_to_var kwd pat (snd kwd) initopt
 
-let build_vars kwd vars = vars |> List.map (build_var kwd)
-let vars_to_defs xs = xs |> List.map (fun (ent, v) -> (ent, VarDef v))
-let vars_to_stmts xs = xs |> vars_to_defs |> List.map (fun x -> DefStmt x)
+let build_vars kwd vars = vars |> List_.map (build_var kwd)
+let vars_to_defs xs = xs |> List_.map (fun (ent, v) -> (ent, VarDef v))
+let vars_to_stmts xs = xs |> vars_to_defs |> List_.map (fun x -> DefStmt x)
 
 (*
    Left-handside patterns and function parameters happen to use the same
@@ -705,7 +716,7 @@ let add_decorators_to_declaration decorators declaration =
   ({ ent with attrs = ent.attrs @ decorators }, defkind)
 
 let add_decorators_to_declarations decorators declarations =
-  List.map (add_decorators_to_declaration decorators) declarations
+  List_.map (add_decorators_to_declaration decorators) declarations
 
 (*****************************************************************************)
 (* Helpers. TODO: move in Tok.ml instead *)
