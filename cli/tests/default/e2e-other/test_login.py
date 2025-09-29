@@ -72,7 +72,8 @@ def test_login_env_token(tmp_path, mocker):
 
     # Patch Token Validation:
     mocker.patch(
-        "semgrep.app.auth.get_deployment_from_token", return_value="deployment_name"
+        "semgrep.app.auth.get_deployment_from_token",
+        return_value={"id": 1, "name": "deployment_name"},
     )
 
     # Login with env token
@@ -109,7 +110,8 @@ def test_login_and_use_registry(tmp_path, mocker):
 
     # Patch Token Validation:
     mocker.patch(
-        "semgrep.app.auth.get_deployment_from_token", return_value="deployment_name"
+        "semgrep.app.auth.get_deployment_from_token",
+        return_value={"id": 1, "name": "deployment_name"},
     )
 
     result = runner.invoke(
@@ -158,4 +160,4 @@ def test_login_and_use_registry(tmp_path, mocker):
     )
     assert result.exit_code == 7
     assert mocked_config.called
-    assert "remote-registry_0 was not a mapping" in result.output
+    assert "missing rules entry as top-level key" in result.output
